@@ -16,7 +16,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { airtableGet, airtableGetRecord, airtableWrite, requireT0Go } from "./lib/airtable-client.js";
+import { airtableGet, airtableGetRecord, airtableWrite, requireT0Go, requireApiKeyOrExit } from "./lib/airtable-client.js";
 
 const CANON_BASE_ID = "appVftexD3KJRcdij";
 const ATQ_TABLE = "tblsVXX2XnhVLWMVE"; // Active Task Queue. Hardcoded. Not a parameter anywhere in this file.
@@ -190,6 +190,7 @@ Args:
   }
 );
 
+requireApiKeyOrExit();
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`sfx-atq-mcp running via stdio (write-scoped to ${ATQ_TABLE} only)`);

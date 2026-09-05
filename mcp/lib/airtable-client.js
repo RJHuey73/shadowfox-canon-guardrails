@@ -28,6 +28,20 @@ function apiKey() {
 }
 
 /**
+ * Call at server startup, before connecting the transport — fail fast and
+ * loud rather than accepting connections and only erroring on first tool
+ * call.
+ */
+export function requireApiKeyOrExit() {
+  if (!process.env.AIRTABLE_API_KEY) {
+    console.error(
+      "ERROR: AIRTABLE_API_KEY environment variable is required. See .env.example."
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Low-level Airtable REST call. Table/base IDs come from the caller's own
  * hardcoded constants — see the module-level invariant note above.
  */

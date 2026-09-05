@@ -18,7 +18,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { airtableGet, airtableWrite, requireT0Go } from "./lib/airtable-client.js";
+import { airtableGet, airtableWrite, requireT0Go, requireApiKeyOrExit } from "./lib/airtable-client.js";
 
 const CANON_BASE_ID = "appVftexD3KJRcdij";
 const DECISION_LOG_TABLE = "tblX88U1VOwmK2fF5"; // T0 Decision Log. Hardcoded. Not a parameter anywhere in this file.
@@ -160,6 +160,7 @@ Args:
   }
 );
 
+requireApiKeyOrExit();
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`sfx-decisionlog-mcp running via stdio (write-scoped to ${DECISION_LOG_TABLE} only)`);

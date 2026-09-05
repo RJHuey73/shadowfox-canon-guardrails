@@ -14,7 +14,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { airtableGet } from "./lib/airtable-client.js";
+import { airtableGet, requireApiKeyOrExit } from "./lib/airtable-client.js";
 
 const CANON_BASE_ID = "appVftexD3KJRcdij";
 const CANON_REGISTRY_TABLE = "tbltw4Jy0LHWWz5DL"; // Canon ID Registry (live) — NOT "Canon Registry (Legacy)" tblzhZLLIqd2VS4Mh
@@ -257,6 +257,7 @@ Exactly one of canon_id / title_contains should be given. Returns JSON: { entrie
   }
 );
 
+requireApiKeyOrExit();
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error("sfx-canon-mcp running via stdio (read-only)");

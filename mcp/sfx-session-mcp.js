@@ -23,7 +23,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { airtableGetRecord, airtableWrite, requireT0Go } from "./lib/airtable-client.js";
+import { airtableGetRecord, airtableWrite, requireT0Go, requireApiKeyOrExit } from "./lib/airtable-client.js";
 
 const CANON_BASE_ID = "appVftexD3KJRcdij";
 const SESSION_TABLE = "tblEZ6ctzSoTBsfCW"; // Session Ledger. Hardcoded. Not a parameter anywhere in this file.
@@ -160,6 +160,7 @@ Returns JSON with all known Session Ledger fields for that record.`,
   }
 );
 
+requireApiKeyOrExit();
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`sfx-session-mcp running via stdio (write-scoped to ${SESSION_TABLE} only)`);
