@@ -131,6 +131,13 @@ export function airtableWrite(baseId, tableId, method, { recordId, fields } = {}
 const GoMarkerSchema = z.object({
   decision_id: z.string().min(1),
   scope: z.array(z.string()),
+  // Tier 1 = operational writes (Session Ledger, ATQ). Tier 2 = governance
+  // writes (Decision Log, and any future Canon-ratification write) — a
+  // higher bar, not just a different label. Resolves the circularity noted
+  // in sfx-decisionlog-mcp.js's header: a Tier 2 marker is explicitly
+  // understood to authorize *recording* a decision, not just an ordinary
+  // write, so minting one is itself a deliberate, heavier-weight act.
+  tier: z.number().int().min(1).max(2).default(1),
   issued_at: z.string(),
   ttl_seconds: z.number().int().positive(),
   consumed: z.boolean().default(false),
@@ -150,7 +157,7 @@ const GoMarkerSchema = z.object({
  * hook/server process — a new secret-surface tradeoff left for T0 to decide,
  * not defaulted here.
  */
-export async function requireT0Go(tableId) {
+export async function requireT0Go(tableId, { minTier = 1 } = {}) {
   let raw;
   try {
     raw = await readFile(GO_MARKER_PATH, "utf-8");
@@ -158,7 +165,7 @@ export async function requireT0Go(tableId) {
     throw new Error(
       `No T0-GO marker at ${GO_MARKER_PATH}. Run hooks/issue_t0_go.py ` +
         `(human-run only — never from an agent session) before this write ` +
-        `can proceed.`
+        `can proceed. This write requires Tier ${minTier}.`
     );
   }
 
@@ -187,6 +194,14 @@ export async function requireT0Go(tableId) {
     );
   }
 
+  if (parsed.tier < minTier) {
+    throw new Error(
+      `T0-GO marker for decision ${parsed.decision_id} is Tier ${parsed.tier}, ` +
+        `but this write requires Tier ${minTier} (governance-class write). ` +
+        `Issue a Tier ${minTier} marker explicitly — Tier is never inferred upward.`
+    );
+  }
+
   const issuedAtMs = Date.parse(parsed.issued_at);
   if (Number.isNaN(issuedAtMs)) {
     throw new Error(
@@ -208,5 +223,5 @@ export async function requireT0Go(tableId) {
     "utf-8"
   );
 
-  return { decision_id: parsed.decision_id };
+  return { decision_id: parsed.decision_id, tier: parsed.tier };
 }

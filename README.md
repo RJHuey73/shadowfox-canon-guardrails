@@ -43,21 +43,32 @@ scaffold contained.
 
 ## The T0-GO marker — closes gap #2 (no in-path enforcement)
 
-Every write tool in every server here calls `requireT0Go(tableId)` before
-touching the network. The check is fail-closed:
+Every write tool in every server here calls `requireT0Go(tableId, { minTier })`
+before touching the network. The check is fail-closed:
 
 - No marker file (`.claude/t0-go.json` in the consuming session's working
   directory, gitignored) → blocked.
 - Marker's `scope` doesn't list the target table ID → blocked.
+- Marker's `tier` is below what the write requires → blocked (see below).
 - `issued_at + ttl_seconds` has elapsed → blocked.
 - Marker already `consumed` → blocked.
 
-A successful check marks the marker consumed (or decrements a `uses` counter
-if you configure multi-use), so it can't be replayed. This is deliberately
-**not** a standing flag — that would just be a new bypassable checkbox, the
-exact weakness this was built to close. `issue_t0_go.py` is the only writer
-of that file, and it's a human-run script, never something a session should
-be able to invoke on itself.
+A successful check marks the marker consumed, so it can't be replayed. This
+is deliberately **not** a standing flag — that would just be a new
+bypassable checkbox, the exact weakness this was built to close.
+`issue_t0_go.py` is the only writer of that file, and it's a human-run
+script, never something a session should be able to invoke on itself.
+
+**Two tiers, adopted 2026-09-05.** Session Ledger and ATQ writes are Tier 1
+(operational) — the default. `decisionlog_create_entry` requires Tier 2
+(governance) explicitly; a Tier 1 marker never satisfies it, even scoped
+correctly, and tier is never inferred upward. This exists because Decision
+Log is different in kind from the other three tables: writing to it doesn't
+just record operational state, it *is* the record of T0 authorization —
+gating it behind the same casual marker used for an ATQ status update was a
+real circularity, not just an aesthetic one. Mint with `--tier 2` when
+that's genuinely what's happening; the default stays 1 so operational
+writes don't silently get treated as heavier than they are.
 
 This is a v1: the marker's `decision_id` field is not live-validated against
 the actual T0 Decision Log (that would mean embedding Airtable credentials

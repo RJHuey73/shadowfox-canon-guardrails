@@ -71,7 +71,7 @@ Returns JSON: { record_id, session_id }. Does not set status or close the record
           [F_STATUS]: "Active",
         },
       });
-      const output = { record_id: result.id, session_id, t0_decision_id: go.decision_id };
+      const output = { record_id: result.id, session_id, t0_decision_id: go.decision_id, t0_go_tier: go.tier };
       return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Error: ${err.message}` }] };
@@ -115,7 +115,7 @@ Returns JSON: { record_id, status: "Closed" }`,
           ...(handoff_notes ? { [F_HANDOFF_NOTES]: handoff_notes } : {}),
         },
       });
-      const output = { record_id, status: "Closed", t0_decision_id: go.decision_id };
+      const output = { record_id, status: "Closed", t0_decision_id: go.decision_id, t0_go_tier: go.tier };
       return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Error: ${err.message}` }] };

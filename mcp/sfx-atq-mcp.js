@@ -141,7 +141,7 @@ Args:
           ...(notes ? { [F_NOTES]: notes } : {}),
         },
       });
-      const output = { record_id: result.id, task_id, t0_decision_id: go.decision_id };
+      const output = { record_id: result.id, task_id, t0_decision_id: go.decision_id, t0_go_tier: go.tier };
       return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Error: ${err.message}` }] };
@@ -182,7 +182,7 @@ Args:
           ...(blocker ? { [F_BLOCKER]: blocker } : {}),
         },
       });
-      const output = { record_id, t0_decision_id: go.decision_id };
+      const output = { record_id, t0_decision_id: go.decision_id, t0_go_tier: go.tier };
       return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Error: ${err.message}` }] };

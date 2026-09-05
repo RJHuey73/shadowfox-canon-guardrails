@@ -46,6 +46,15 @@ PROTECTED_TABLES = {
     "tblX88U1VOwmK2fF5": "T0 Decision Log",  # added, gap #1
 }
 
+# Scopes that require a Tier 2 (governance-class) marker, not just Tier 1
+# (operational). Two-tier markers adopted 2026-09-05 — see
+# mcp/sfx-decisionlog-mcp.js header comment for why Decision Log specifically.
+# A plain Tier 1 marker never satisfies these, even if scoped correctly.
+TIER_2_SCOPES = {"tblX88U1VOwmK2fF5"}  # T0 Decision Log
+
+# Per find_go_scope_for_mcp "kind" -> minimum tier required.
+KIND_MIN_TIER = {"sfx_decisionlog": 2}
+
 # Both Supabase project refs, as referenced in this session's own live
 # Airtable queries (TQ-023/TQ-024 DROP SCHEMA records) — not invented here.
 SUPABASE_REFS = {"mksmwqmphdkwwiyfesad", "oufyfdhjjvhrseythgrr"}
@@ -111,7 +120,8 @@ def check_bash(command: str) -> None:
         matched_scopes.add(CANON_BASE_ID)
 
     for scope in matched_scopes:
-        check_t0_go(scope)
+        min_tier = 2 if scope in TIER_2_SCOPES else 1
+        check_t0_go(scope, min_tier=min_tier)
 
 
 def find_go_scope_for_mcp(tool_name: str, tool_input: dict, kind: str):
@@ -137,11 +147,12 @@ def find_go_scope_for_mcp(tool_name: str, tool_input: dict, kind: str):
     return None
 
 
-def check_t0_go(scope: str) -> None:
+def check_t0_go(scope: str, min_tier: int = 1) -> None:
     if not GO_MARKER_PATH.exists():
         block(
             f"pre_tool_guard: no T0-GO marker at {GO_MARKER_PATH} for scope "
-            f"'{scope}'. Run hooks/issue_t0_go.py (human-run only) first."
+            f"'{scope}' (requires Tier {min_tier}). Run hooks/issue_t0_go.py "
+            f"(human-run only) first."
         )
 
     try:
@@ -161,6 +172,14 @@ def check_t0_go(scope: str) -> None:
         block(
             f"pre_tool_guard: T0-GO marker for decision {marker.get('decision_id')} "
             f"does not cover '{scope}' (covers: {scope_list}). Issue a marker scoped to this write."
+        )
+
+    marker_tier = marker.get("tier", 1)
+    if marker_tier < min_tier:
+        block(
+            f"pre_tool_guard: T0-GO marker for decision {marker.get('decision_id')} is "
+            f"Tier {marker_tier}, but '{scope}' requires Tier {min_tier} (governance-class "
+            f"write). Issue a Tier {min_tier} marker explicitly."
         )
 
     try:
@@ -205,7 +224,7 @@ def main() -> None:
         if pattern.match(tool_name):
             scope = find_go_scope_for_mcp(tool_name, tool_input, kind)
             if scope is not None:
-                check_t0_go(scope)
+                check_t0_go(scope, min_tier=KIND_MIN_TIER.get(kind, 1))
             allow()
             return
 

@@ -5,14 +5,16 @@
  *
  * New in this repo (closes work-order gap #1). No prior-art claim.
  *
- * Open design tension, flagged rather than silently resolved: this table IS
- * the record of T0 authorization. Gating a new Decision Log entry behind the
- * same generic T0-GO marker used for Session Ledger / ATQ writes is a little
- * circular — a marker is meant to point at a decision that already exists,
- * and here the write IS the decision being recorded. Shipping this gated the
- * same way as the others for v1 consistency, but this is exactly the kind of
- * "ASK, don't default" question CANON-378 §5 calls for before treating it as
- * settled. See README.
+ * Resolved (two-tier GO markers, adopted 2026-09-05): a plain Tier 1 marker
+ * — the kind that gates Session Ledger / ATQ operational writes — is NOT
+ * enough here. decisionlog_create_entry requires a marker explicitly minted
+ * with tier: 2 (governance-class). Tier is never inferred upward from a
+ * Tier 1 marker, so this can't be satisfied by accident with whatever
+ * marker happens to be sitting around from an unrelated operational write.
+ * This is what actually closes the circularity noted in an earlier revision
+ * of this file: minting a Tier 2 marker is itself understood as a
+ * deliberate, heavier act than minting a Tier 1 one, not just a different
+ * string in the same bucket.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -117,9 +119,7 @@ server.registerTool(
   "decisionlog_create_entry",
   {
     title: "Create a T0 Decision Log Entry",
-    description: `Requires a valid, unconsumed T0-GO marker scoped to ${DECISION_LOG_TABLE} — fails closed otherwise.
-
-See this file's header comment: gating a *new decision record* behind the same generic marker used elsewhere is a known open design tension, not a settled answer. Use with that in mind, and surface it to T0 rather than treating this tool as equivalent in weight to an ATQ status update.
+    description: `Requires a valid, unconsumed, TIER 2 T0-GO marker scoped to ${DECISION_LOG_TABLE} — fails closed otherwise, including against an otherwise-valid Tier 1 marker. See this file's header comment for why Tier 2 specifically.
 
 Args:
   - decision_id (string): e.g. "T0-DEC-EXAMPLE-2026-0905"
@@ -140,7 +140,7 @@ Args:
   },
   async ({ decision_id, ruling, source_session, canon_impact, affected_entries, context }) => {
     try {
-      const go = await requireT0Go(DECISION_LOG_TABLE);
+      const go = await requireT0Go(DECISION_LOG_TABLE, { minTier: 2 });
       const result = await airtableWrite(CANON_BASE_ID, DECISION_LOG_TABLE, "POST", {
         fields: {
           [F_DECISION_ID]: decision_id,
@@ -152,7 +152,7 @@ Args:
           ...(context ? { [F_CONTEXT]: context } : {}),
         },
       });
-      const output = { record_id: result.id, decision_id, t0_go_decision_id: go.decision_id };
+      const output = { record_id: result.id, decision_id, t0_go_decision_id: go.decision_id, t0_go_tier: go.tier };
       return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Error: ${err.message}` }] };

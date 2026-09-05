@@ -46,6 +46,13 @@ def main() -> None:
     )
     parser.add_argument("--ttl", type=int, default=600, help="Seconds until this marker expires (default 600).")
     parser.add_argument(
+        "--tier",
+        type=int,
+        choices=[1, 2],
+        default=1,
+        help="1 = operational write (Session Ledger, ATQ). 2 = governance write (Decision Log). Default 1.",
+    )
+    parser.add_argument(
         "--path",
         type=Path,
         default=DEFAULT_MARKER_PATH,
@@ -67,6 +74,7 @@ def main() -> None:
     marker = {
         "decision_id": args.decision_id,
         "scope": args.scope,
+        "tier": args.tier,
         "issued_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "ttl_seconds": args.ttl,
         "consumed": False,
@@ -77,6 +85,7 @@ def main() -> None:
     print(f"T0-GO marker written to {args.path}")
     print(f"  decision_id: {marker['decision_id']}")
     print(f"  scope:       {marker['scope']}")
+    print(f"  tier:        {marker['tier']}")
     print(f"  expires:     in {args.ttl}s")
 
 
