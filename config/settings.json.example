@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      },
+      {
+        "matcher": "mcp__Airtable__(create|update|delete)_.*",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      },
+      {
+        "matcher": "mcp__github__(push_files|create_or_update_file|delete_file|merge_pull_request)",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      },
+      {
+        "matcher": "mcp__Supabase__apply_migration",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      },
+      {
+        "matcher": "mcp__sfx-session-mcp__(session_open|session_close)",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      },
+      {
+        "matcher": "mcp__sfx-atq-mcp__(atq_create_task|atq_update_task)",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      },
+      {
+        "matcher": "mcp__sfx-decisionlog-mcp__decisionlog_create_entry",
+        "hooks": [
+          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+        ]
+      }
+    ]
+  }
+}

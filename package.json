@@ -1,0 +1,20 @@
+{
+  "name": "shadowfox-canon-guardrails",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code governance hooks + narrow single-table MCP servers for the Shadowfox Canon Spine",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start:canon": "node mcp/sfx-canon-mcp.js",
+    "start:session": "node mcp/sfx-session-mcp.js",
+    "start:atq": "node mcp/sfx-atq-mcp.js",
+    "start:decisionlog": "node mcp/sfx-decisionlog-mcp.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "zod": "^3.23.8"
+  }
+}

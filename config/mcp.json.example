@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "sfx-canon-mcp": {
+      "command": "node",
+      "args": ["mcp/sfx-canon-mcp.js"],
+      "env": { "AIRTABLE_API_KEY": "${AIRTABLE_API_KEY}" }
+    },
+    "sfx-session-mcp": {
+      "command": "node",
+      "args": ["mcp/sfx-session-mcp.js"],
+      "env": { "AIRTABLE_API_KEY": "${AIRTABLE_API_KEY}" }
+    },
+    "sfx-atq-mcp": {
+      "command": "node",
+      "args": ["mcp/sfx-atq-mcp.js"],
+      "env": { "AIRTABLE_API_KEY": "${AIRTABLE_API_KEY}" }
+    },
+    "sfx-decisionlog-mcp": {
+      "command": "node",
+      "args": ["mcp/sfx-decisionlog-mcp.js"],
+      "env": { "AIRTABLE_API_KEY": "${AIRTABLE_API_KEY}" }
+    }
+  }
+}
