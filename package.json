@@ -14,7 +14,7 @@
     "start:decisionlog": "node mcp/sfx-decisionlog-mcp.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.6.1",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "zod": "^3.23.8"
   }
 }
