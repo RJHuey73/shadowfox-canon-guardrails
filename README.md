@@ -76,6 +76,33 @@ inside the hook process — a new secret-handling surface, and a call for T0,
 not defaulted here). Treat the free-text `decision_id` as a paper trail, not
 a cryptographic guarantee.
 
+### Marker contract (shared by both readers)
+
+`hooks/pre_tool_guard.py` and `mcp/lib/airtable-client.js` enforce the same
+rules, pinned by `tests/fixtures/marker_cases.json` (both suites run it):
+top-level JSON object; `decision_id` non-empty string; `scope` non-empty list
+of non-empty strings; `tier` integer 1 or 2 (default 1); `issued_at`
+ISO-8601 with an explicit offset, at most 60 s in the future;
+`ttl_seconds` positive integer; `consumed` boolean (default false). Anything
+else is refused. Consumption in `requireT0Go()` holds an exclusive
+`<marker>.lock` file for the read-check-consume step, so concurrent writes
+(including across the four servers) consume one marker once. A lock left by a
+crashed server blocks writes until a human deletes it.
+
+See `docs/THREAT-MODEL.md` for what is and is not defended, including
+open trust assumptions.
+
+## Tests
+
+Offline: Airtable is answered by `tests/js/fetch-mock.mjs`, markers live in
+temp directories, and no credential is needed.
+
+```bash
+npm ci && npm test                  # node:test — marker contract + MCP tool handlers over stdio
+pip install pytest
+python3 -m pytest tests/python -q   # hook entrypoint + marker contract
+```
+
 ## Field IDs, not names
 
 All Airtable field references use `fld...` IDs (matching the convention used

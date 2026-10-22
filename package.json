@@ -11,7 +11,9 @@
     "start:canon": "node mcp/sfx-canon-mcp.js",
     "start:session": "node mcp/sfx-session-mcp.js",
     "start:atq": "node mcp/sfx-atq-mcp.js",
-    "start:decisionlog": "node mcp/sfx-decisionlog-mcp.js"
+    "start:decisionlog": "node mcp/sfx-decisionlog-mcp.js",
+    "test": "node --test tests/js/*.test.mjs",
+    "test:py": "python3 -m pytest tests/python -q"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",

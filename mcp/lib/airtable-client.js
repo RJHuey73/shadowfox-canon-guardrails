@@ -10,7 +10,8 @@
  * user/agent-supplied tool input.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 const AIRTABLE_API_URL = "https://api.airtable.com/v0";
@@ -128,9 +129,22 @@ export function airtableWrite(baseId, tableId, method, { recordId, fields } = {}
   });
 }
 
+// The marker contract is shared with hooks/pre_tool_guard.py and pinned by
+// tests/fixtures/marker_cases.json, which both implementations run. Change
+// the two readers and the fixtures together.
+//
+// issued_at must be ISO-8601 with an explicit offset (the issuer writes
+// microseconds + "Z"); Date.parse would otherwise accept free text and read
+// offset-less times as local time.
+const ISSUED_AT_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?(?:Z|[+-]\d{2}:\d{2})$/;
+// A marker dated further ahead than this is refused: otherwise a future
+// issued_at stretches its lifetime without bound.
+const MAX_CLOCK_SKEW_MS = 60_000;
+
 const GoMarkerSchema = z.object({
   decision_id: z.string().min(1),
-  scope: z.array(z.string()),
+  scope: z.array(z.string().min(1)).min(1),
   // Tier 1 = operational writes (Session Ledger, ATQ). Tier 2 = governance
   // writes (Decision Log, and any future Canon-ratification write) — a
   // higher bar, not just a different label. Resolves the circularity noted
@@ -138,7 +152,7 @@ const GoMarkerSchema = z.object({
   // understood to authorize *recording* a decision, not just an ordinary
   // write, so minting one is itself a deliberate, heavier-weight act.
   tier: z.number().int().min(1).max(2).default(1),
-  issued_at: z.string(),
+  issued_at: z.string().regex(ISSUED_AT_RE, "must be ISO-8601 with a timezone offset"),
   ttl_seconds: z.number().int().positive(),
   consumed: z.boolean().default(false),
 });
@@ -158,6 +172,40 @@ const GoMarkerSchema = z.object({
  * not defaulted here.
  */
 export async function requireT0Go(tableId, { minTier = 1 } = {}) {
+  // Read-check-consume must be one critical section, or concurrent calls
+  // (in one server, or across the four servers sharing this marker) each
+  // see it unconsumed and each proceed. O_EXCL creation of a lock file is
+  // atomic across processes; whoever loses is refused, never waited on.
+  const lockPath = `${GO_MARKER_PATH}.lock`;
+  let lock;
+  try {
+    lock = await open(lockPath, "wx");
+  } catch (err) {
+    if (err.code === "EEXIST") {
+      throw new Error(
+        `T0-GO marker at ${GO_MARKER_PATH} is being checked by another write ` +
+          `(${lockPath} exists). Retry; if no write is in flight, a crashed ` +
+          `server left the lock behind — a human should remove it.`
+      );
+    }
+    if (err.code === "ENOENT") {
+      throw new Error(
+        `No T0-GO marker at ${GO_MARKER_PATH}. Run hooks/issue_t0_go.py ` +
+          `(human-run only — never from an agent session) before this write ` +
+          `can proceed. This write requires Tier ${minTier}.`
+      );
+    }
+    throw new Error(`Cannot lock T0-GO marker at ${GO_MARKER_PATH}: ${err.message}`);
+  }
+  try {
+    return await checkAndConsume(tableId, minTier);
+  } finally {
+    await lock.close();
+    await unlink(lockPath).catch(() => {});
+  }
+}
+
+async function checkAndConsume(tableId, minTier) {
   let raw;
   try {
     raw = await readFile(GO_MARKER_PATH, "utf-8");
@@ -208,6 +256,12 @@ export async function requireT0Go(tableId, { minTier = 1 } = {}) {
       `T0-GO marker has an unparseable issued_at (${parsed.issued_at}).`
     );
   }
+  if (issuedAtMs > Date.now() + MAX_CLOCK_SKEW_MS) {
+    throw new Error(
+      `T0-GO marker for decision ${parsed.decision_id} is dated in the future ` +
+        `(${parsed.issued_at}). Refusing it — re-issue it.`
+    );
+  }
   const expiresAtMs = issuedAtMs + parsed.ttl_seconds * 1000;
   if (Date.now() > expiresAtMs) {
     throw new Error(
@@ -216,12 +270,11 @@ export async function requireT0Go(tableId, { minTier = 1 } = {}) {
     );
   }
 
-  // Consume it so it can't be replayed for a second write.
-  await writeFile(
-    GO_MARKER_PATH,
-    JSON.stringify({ ...parsed, consumed: true }, null, 2),
-    "utf-8"
-  );
+  // Consume it so it can't be replayed for a second write. Write-then-rename
+  // so a concurrent reader (the hook) never sees a half-written file.
+  const tmpPath = `${GO_MARKER_PATH}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tmpPath, JSON.stringify({ ...parsed, consumed: true }, null, 2), "utf-8");
+  await rename(tmpPath, GO_MARKER_PATH);
 
   return { decision_id: parsed.decision_id, tier: parsed.tier };
 }
