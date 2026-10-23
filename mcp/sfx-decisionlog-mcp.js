@@ -92,7 +92,9 @@ Returns empty array if no match — that's a valid result, not evidence a ruling
   },
   async ({ query, limit }) => {
     try {
-      const q = query.replace(/"/g, '\\"');
+      // Escape backslashes first: escaping only quotes lets a query ending in
+      // a backslash turn the added \" back into a closing quote.
+      const q = query.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       const formula = `OR(FIND("${q}", {${F_RULING}}), FIND("${q}", {${F_CONTEXT}}), FIND("${q}", {${F_AFFECTED_ENTRIES}}))`;
       const data = await airtableGet(CANON_BASE_ID, DECISION_LOG_TABLE, {
         filterByFormula: formula,

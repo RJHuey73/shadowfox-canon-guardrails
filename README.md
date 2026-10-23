@@ -56,8 +56,13 @@ before touching the network. The check is fail-closed:
 A successful check marks the marker consumed, so it can't be replayed. This
 is deliberately **not** a standing flag — that would just be a new
 bypassable checkbox, the exact weakness this was built to close.
-`issue_t0_go.py` is the only writer of that file, and it's a human-run
-script, never something a session should be able to invoke on itself.
+`issue_t0_go.py` is the only *intended* writer of that file, and it is meant
+to be human-run. **Nothing enforces that.** The marker is an unsigned file in
+the session's working directory: an agent session that can write files or run
+Bash can create one or run the issuer itself (pinned in
+`tests/python/test_known_gaps.py`). A marker is therefore evidence that
+*someone* wrote it, not proof that a human authorized the write; see
+`docs/THREAT-MODEL.md` (T10).
 
 **Two tiers, adopted 2026-09-05.** Session Ledger and ATQ writes are Tier 1
 (operational) — the default. `decisionlog_create_entry` requires Tier 2
@@ -75,6 +80,34 @@ the actual T0 Decision Log (that would mean embedding Airtable credentials
 inside the hook process — a new secret-handling surface, and a call for T0,
 not defaulted here). Treat the free-text `decision_id` as a paper trail, not
 a cryptographic guarantee.
+
+### Marker contract (shared by both readers)
+
+`hooks/pre_tool_guard.py` and `mcp/lib/airtable-client.js` enforce the same
+rules, pinned by `tests/fixtures/marker_cases.json` (both suites run it):
+top-level JSON object; `decision_id` non-empty string; `scope` non-empty list
+of non-empty strings; `tier` integer 1 or 2 (default 1); `issued_at`
+ISO-8601 with an explicit offset, at most 60 s in the future;
+`ttl_seconds` positive integer; `consumed` boolean (default false). Anything
+else is refused. Consumption in `requireT0Go()` holds an exclusive
+`<marker>.lock` file for the read-check-consume step, so concurrent writes
+(including across the four servers) consume one marker once. A lock left by a
+crashed server blocks writes until a human deletes it.
+
+See `docs/THREAT-MODEL.md` for what is and is not defended, including
+open trust assumptions.
+
+## Tests
+
+Offline: Airtable is answered by `tests/js/fetch-mock.mjs`, markers live in
+temp directories, and no credential is needed.
+
+```bash
+npm ci && npm test                  # node:test — marker contract + MCP tool handlers over stdio
+pip install pytest
+python3 -m pytest -q -m "not known_gap"   # security acceptance: hook, harness boundary, marker contract
+python3 -m pytest -q -m known_gap         # KNOWN GAPS: pins unfixed behaviour, not acceptance
+```
 
 ## Field IDs, not names
 
