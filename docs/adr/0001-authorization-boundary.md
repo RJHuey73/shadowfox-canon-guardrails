@@ -1,7 +1,7 @@
 # ADR-0001: Authorization boundary for Canon Spine writes
 
 - **Status:** Proposed. T2 draft, `ratified: false`. No Canon ID is assigned; I asserted none.
-- **Repo:** `RJHuey73/shadowfox-canon-guardrails`. Committed for review on T0 approval (G2) and amended on T0 review direction of 2026-10-23. Committing or amending it does **not** ratify it.
+- **Repo:** `RJHuey73/shadowfox-canon-guardrails`. Committed for review on T0 approval (G2), amended on T0 review direction of 2026-10-23, and amended again on T0 approval of review findings A–C (time handling, response classification, `REVOKED`). Committing or amending it does **not** ratify it.
 - **Context commit:** PR #2 head `993677eb07ca259ae78a758f9cfb8d803045b710`.
 - **Decides:** where the authority to perform a **Canon Spine** write lives, and what has to hold before one happens.
 - **Scope:** Canon Spine routes only, meaning writes to Airtable base `appVftexD3KJRcdij`. This ADR establishes the proposed boundary for Canon Spine writes. GitHub and Supabase require separate capability inventories and route-specific enforcement decisions.
@@ -87,9 +87,12 @@ The broker builds and stores one envelope per write request at submit time. Enve
 ```
 PENDING ──approve──▶ APPROVED ──reserve──▶ DISPATCH_RESERVED ──▶ SUCCEEDED
    │                    │                         │
-   ├─deny──▶ DENIED     ├─expire/revoke──▶ EXPIRED ├──▶ FAILED_CONFIRMED
-   └─expire─▶ EXPIRED                              └──▶ OUTCOME_UNKNOWN ──reconcile──▶ SUCCEEDED | FAILED_CONFIRMED
+   ├─deny───▶ DENIED    ├─expire──▶ EXPIRED       ├──▶ FAILED_CONFIRMED
+   ├─expire─▶ EXPIRED   └─revoke──▶ REVOKED       └──▶ OUTCOME_UNKNOWN ──reconcile──▶ SUCCEEDED | FAILED_CONFIRMED
+   └─revoke─▶ REVOKED
 ```
+
+`DENIED`, `EXPIRED`, `REVOKED`, `SUCCEEDED` and `FAILED_CONFIRMED` are terminal. `OUTCOME_UNKNOWN` is terminal except for the approver-only reconciliation below.
 
 **Atomic local consumption is not the same as an atomic remote effect.**
 - What the broker *can* make atomic: approval consumption and dispatch reservation, in one local SQLite transaction (`BEGIN IMMEDIATE`; `APPROVED → DISPATCH_RESERVED`; the row records `dispatch_attempt_id` and `reserved_at`). That transaction commits durably (`synchronous=FULL`) **before** any network byte is sent.
@@ -99,13 +102,30 @@ PENDING ──approve──▶ APPROVED ──reserve──▶ DISPATCH_RESERVED
 **State transition rules:**
 - `DISPATCH_RESERVED` can be entered only from `APPROVED`, exactly once per `request_id` (`UNIQUE(request_id)` on the dispatch table). The single HTTPS request is sent only after that commit.
 - **`SUCCEEDED`:** a 2xx response with a record ID was received and committed, along with the record ID.
-- **`FAILED_CONFIRMED`:** a response was received that confirms Airtable did not apply the write. Specifically 400, 401, 403, 404, 413, 422 and 429. The response is stored.
+- **`FAILED_CONFIRMED`:** a response was received that is a *documented rejection with no side effect*, meaning the vendor documents that status as a refusal to process the request. The candidate set is 400, 401, 403, 404, 413, 422 and 429. Each code stays in the set only if, at implementation time, Airtable's current API documentation still describes it as a rejection that applies no change. A code that can't be confirmed that way is classified `OUTCOME_UNKNOWN` instead. The response is stored.
 - **`OUTCOME_UNKNOWN`** covers every other case:
   - a timeout or connection error after the request was sent;
   - any 5xx;
   - a 2xx whose body can't be parsed;
+  - any status not in the confirmed-rejection set, or any response whose side effect is ambiguous;
   - a broker crash or restart while `DISPATCH_RESERVED`. On startup, every `DISPATCH_RESERVED` row without a terminal state becomes `OUTCOME_UNKNOWN`.
 - **No automatic retry, ever.** A retry is a new request: new `request_id`, new digest, new human approval.
+
+**Revocation (`REVOKED`) and its ordering against reservation.**
+- `revoke` applies only to requests in `PENDING` or `APPROVED`. It moves them to the terminal state `REVOKED`, which is recorded separately from `EXPIRED`, so the audit trail shows a human revocation rather than a timeout.
+- `revoke` and `reserve` are both single conditional state updates, each in its own `BEGIN IMMEDIATE` transaction:
+  - `reserve` is `UPDATE … SET state='DISPATCH_RESERVED' WHERE request_id=? AND state='APPROVED'`;
+  - `revoke` is `UPDATE … SET state='REVOKED' WHERE request_id=? AND state IN ('PENDING','APPROVED')`.
+- SQLite serialises the two writers, so exactly one of them changes the row. Whichever commits first wins, and the loser sees zero rows changed and reports that.
+- **Revocation never cancels a reserved or in-flight write.** Once a request is `DISPATCH_RESERVED`, `revoke` is refused with "already reserved; the write may be in flight", and the state is unchanged. The request ends `SUCCEEDED`, `FAILED_CONFIRMED` or `OUTCOME_UNKNOWN` like any other. `revoke-all` affects only `PENDING` and `APPROVED` requests.
+- Because the network send happens only after the `reserve` commit, a request whose revoke committed first is never sent.
+
+**Time handling (approval and pending lifetimes).**
+- Lifetimes are enforced so that a wall-clock rollback cannot extend them:
+  - while the broker process runs, elapsed time since approval (and since submission) is measured with a monotonic clock (`time.monotonic()`, i.e. `CLOCK_MONOTONIC`), which wall-clock changes don't affect;
+  - a request is valid only if **both** the monotonic elapsed time **and** the wall-clock elapsed time (`now − approved_at`, `now − created_at`) are within the ceiling. A forward wall-clock jump can therefore only shorten validity, and a rollback can't lengthen it within a process.
+- **Restart.** A monotonic clock doesn't survive a restart, so elapsed time since approval can no longer be proven. On startup the broker moves every `APPROVED` request to `EXPIRED` and every `PENDING` request to `EXPIRED` (fail closed), in the same startup transaction that moves `DISPATCH_RESERVED` rows to `OUTCOME_UNKNOWN`. The human re-approves after a restart.
+- **What this does not solve.** A check such as "refuse if `now < created_at`" catches only rollbacks to before creation; a rollback that stays after `created_at` passes it. Wall-clock checks alone cannot detect rollback, which is why validity also depends on in-process monotonic time and is reset on restart. A rollback while the broker is stopped is covered only by the restart rule.
 
 **`OUTCOME_UNKNOWN` reconciliation (approver-only).**
 1. The broker offers a read-only `reconcile <request_id>` that queries the target table:
@@ -138,12 +158,13 @@ PENDING ──approve──▶ APPROVED ──reserve──▶ DISPATCH_RESERVED
 - This closes T9 and T11 **for Canon routes only**. GitHub and Supabase require separate capability inventories and route-specific enforcement decisions; their T9/T11 entries stay open.
 
 **R6. Fail closed, independent of the hook and the harness.**
-- The broker denies by default. Any of these means no dispatch: a validation error, a missing or expired approval, a digest mismatch, an unknown envelope version, a clock skew beyond 60 s between `created_at` and the broker clock, or the broker being down.
+- The broker denies by default. Any of these means no dispatch: a validation error, a missing or expired approval, a digest mismatch, an unknown envelope version, a lifetime that the time-handling rules in §2.4 cannot prove is unexpired (including any approval that predates a broker restart), or the broker being down.
 - Because the harness treats hook timeouts, crashes, sessions without hooks and permission-bypass modes as non-blocking, **no requirement may rely on the hook running**.
 
 **R7. Maximum TTL and human-controlled recovery.**
 - Approval lifetime is ≤ 15 min, and pending request lifetime is ≤ 60 min. Both ceilings live in configuration owned by the broker account (§2.1 P4).
-- Approver-only commands: `revoke <request_id>`, `revoke-all`, `reconcile`, `resolve`, `rotate-credential`, `export-audit`.
+- Approver-only commands: `revoke <request_id>` (from `PENDING`/`APPROVED` only; see §2.4), `revoke-all`, `reconcile`, `resolve`, `rotate-credential`, `export-audit`.
+- Lifetimes are measured as specified under "Time handling" in §2.4. A restart expires every approval that isn't yet reserved.
 - The audit log is append-only and kept in the broker's own state. It records every state transition, with digest, UIDs, timestamps and the Airtable response status or record ID.
 
 ### 2.6 Minimal broker shape (the recommendation; not implemented by this ADR)
@@ -219,7 +240,7 @@ The broker is killed with `SIGKILL` at each injected fault point and then restar
 
 | Fault point | Expected state after restart | Mock server requests |
 |---|---|---|
-| after `approve` commit, before reservation | `APPROVED` (dispatchable once) | 0 |
+| after `approve` commit, before reservation | `EXPIRED` (approval can't be proven unexpired after a restart; re-approval needed) | 0 |
 | after reservation commit, before send | `OUTCOME_UNKNOWN` | 0 |
 | after send, before response | `OUTCOME_UNKNOWN` | 1 |
 | after 2xx received, before terminal commit | `OUTCOME_UNKNOWN` | 1 |
@@ -229,9 +250,21 @@ The broker is killed with `SIGKILL` at each injected fault point and then restar
 - In no case does the mock server receive a second request for the same `request_id`.
 - **Concurrency:** 8 concurrent `dispatch` attempts on one `APPROVED` request give exactly 1 reservation and at most 1 request.
 - **Mock responses:**
-  - 400, 422 and 429 map to `FAILED_CONFIRMED`;
+  - 400, 401, 403, 404, 413, 422 and 429 each map to `FAILED_CONFIRMED` (one case per code), provided the implementation PR cites Airtable's documentation for each as a rejection with no side effect. A code without that citation is tested as `OUTCOME_UNKNOWN` instead;
+  - an unlisted status (e.g. 409, 418) maps to `OUTCOME_UNKNOWN`;
   - 500, 503, a timeout after send, and a 2xx with an unparseable body map to `OUTCOME_UNKNOWN`;
   - none of them is retried.
+- **Revocation:**
+  - `revoke` on `PENDING` or `APPROVED` gives `REVOKED`, the mock server receives 0 requests, and a later `approve`/`dispatch` is refused;
+  - `revoke` and `reserve` raced 50 times on fresh `APPROVED` requests: each request ends either `REVOKED` with 0 requests sent, or `DISPATCH_RESERVED` (then a terminal dispatch state) with at most 1 request sent, never both;
+  - `revoke` on `DISPATCH_RESERVED`, or on any terminal state, is refused, the state is unchanged, and the in-flight request is not affected;
+  - `revoke-all` touches only `PENDING`/`APPROVED`;
+  - the audit log distinguishes `REVOKED` from `EXPIRED`.
+- **Time handling** (with an injected wall clock and an injected monotonic clock):
+  - wall clock set back by 1 h after approval: the approval still expires when monotonic elapsed time reaches the ceiling;
+  - wall clock jumped forward past the ceiling: the approval expires immediately (fail closed);
+  - restart (new monotonic origin): every `APPROVED` and `PENDING` request becomes `EXPIRED`, and the mock server receives 0 requests;
+  - wall clock set back to before `created_at`: refused. The test asserts this is not the only rollback protection: a rollback that stays after `created_at` is also caught by the monotonic check.
 - **Reconciliation:**
   - `reconcile` on an update route reports field matches correctly;
   - `resolve` is refused from a non-approver UID;
