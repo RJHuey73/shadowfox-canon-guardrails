@@ -1,9 +1,10 @@
 # ADR-0001: Authorization boundary for Canon Spine writes
 
 - **Status:** Proposed. T2 draft, `ratified: false`. No Canon ID is assigned; I asserted none.
-- **Repo:** `RJHuey73/shadowfox-canon-guardrails`. Committed for review on T0 approval (G2). Committing it does **not** ratify it.
+- **Repo:** `RJHuey73/shadowfox-canon-guardrails`. Committed for review on T0 approval (G2) and amended on T0 review direction of 2026-10-23. Committing or amending it does **not** ratify it.
 - **Context commit:** PR #2 head `993677eb07ca259ae78a758f9cfb8d803045b710`.
-- **Decides:** where the authority to perform a Canon Spine write lives, and what has to hold before one happens.
+- **Decides:** where the authority to perform a **Canon Spine** write lives, and what has to hold before one happens.
+- **Scope:** Canon Spine routes only, meaning writes to Airtable base `appVftexD3KJRcdij`. This ADR establishes the proposed boundary for Canon Spine writes. GitHub and Supabase require separate capability inventories and route-specific enforcement decisions.
 
 ## 1. Context
 
@@ -23,60 +24,140 @@ Guardrails PR #2 (not yet merged) hardened the parsing and consumption of that f
 | T12 | Undecodable hook input is allowed. Claude Code also treats a hook timeout or any non-2 exit as non-blocking. |
 | — | TTL is unbounded. |
 
-**The underlying problem is that whoever holds the write credential can write.** While the credential sits inside the agent's OS identity, no file format, signature check, or deny rule inside that identity can prove a human approved a write. The agent can skip the check and call the API with the key.
+**The underlying problem is that whoever holds the write credential can write.** While the credential sits inside the agent's control, no file format, signature check, or deny rule inside that boundary can prove a human approved a write. The agent can skip the check and call the API with the key.
 
-**What this ADR does not claim.** Deny rules (hook matchers on the marker path or the issuer) and unsigned marker files are **not** treated as proof of human-only authorization anywhere in this ADR. They are defense in depth: they lower the chance of an accidental write. They are not an identity boundary.
+**What this ADR does not claim:**
+- Deny rules (hook matchers on the marker path or the issuer) and unsigned marker files are **not** treated as proof of human-only authorization anywhere in this ADR. They are defense in depth that lowers the chance of an accidental write; they are not an identity boundary.
+- This ADR does **not** close any gap for GitHub or Supabase routes. It also does not guarantee *exactly-once* effects on Airtable; see R3.
 
 ## 2. Decision
 
-Move write authority out of the agent's OS identity into a **minimal local broker** that runs under a **separate OS account**, and make it the only holder of any credential able to mutate the Canon Spine.
+Move Canon Spine write authority into a **minimal local broker**. The broker runs under an OS identity the agent cannot control (§2.1), is the only holder of any credential able to mutate the Canon Spine, and executes only the immutable requests it has itself stored and a human has approved.
 
-### Requirements (each is a design constraint the implementation must satisfy)
+### 2.1 Isolation requirement, stated in terms of actual privileges
+
+**Do not provision write credentials where the agent retains root, equivalent privilege, or another path to control the broker.**
+
+A separate account *name* is not sufficient. A deployment qualifies only if **every** item below holds for the agent's OS identity, meaning the account that runs Claude Code and every process it spawns:
+
+| # | The agent identity must NOT be able to… | Typical ways this fails |
+|---|---|---|
+| P1 | run code as uid 0 or as the broker account | is root; `sudo`, `doas`, `pkexec` or `su` with any rule; a setuid helper it can influence |
+| P2 | gain root-equivalent privilege | membership in `docker`, `lxd`, `libvirt`, `disk`, `wheel`/`sudo`/`admin`; `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, `CAP_DAC_OVERRIDE` or `CAP_SETUID` |
+| P3 | read the broker's credential, key, state DB or config | the files must be owned by the broker account with mode `0600`/`0700`, and the agent must not be in their group |
+| P4 | modify what the broker executes | write access to the broker's code, interpreter, `site-packages`, systemd/launchd unit, environment files or socket directory |
+| P5 | inspect or signal the broker process | `ptrace` or `/proc/<pid>/mem` access (separate uid plus Yama `ptrace_scope ≥ 1`); sending signals (separate uid suffices) |
+| P6 | act as the approver | sharing the approver's login, SSH keys, `tmux`/`screen` sockets, GUI session, or terminal; Claude Code running *as* the approver account |
+| P7 | reach the approval channel | `approve.sock` mode `0660` with group = approver only, and the broker additionally checks the peer UID on every call |
+
+Consequences of §2.1:
+- **Claude Code must run under its own account**, distinct from the human approver's. Running it as the human's own login makes the agent the approver (fails P6).
+- **Cloud and container sessions where the agent is root** (this authoring session included) fail P1. They must never receive a Canon write credential.
+- **Verification:** before any write credential is provisioned, the rollout runs the privilege-boundary checks in §6.1 *on the target host* and records the results.
+
+### 2.2 Versioned canonical approval envelope
+
+The broker builds and stores one envelope per write request at submit time. Envelope version 1 (`"envelope_version": "sfx-canon-approval/1"`):
+
+| Field | Type | Rule |
+|---|---|---|
+| `envelope_version` | string | exactly `sfx-canon-approval/1`; an unknown version is refused |
+| `request_id` | string | UUIDv4 generated **by the broker** |
+| `route` | string | one of a fixed enum, e.g. `canon.session_ledger.create`, `canon.session_ledger.update`, `canon.atq.create`, `canon.atq.update`, `canon.decision_log.create` |
+| `method` | string | `POST` or `PATCH`, derived from `route` (never supplied by the client) |
+| `base_id`, `table_id` | string | derived from `route` via the broker's own constants (never supplied by the client) |
+| `record_id` | string or null | `^rec[A-Za-z0-9]{14}$`; required for update routes, null for create routes |
+| `fields` | object | keys are `fld…` IDs from the route's allow-list; values are JSON strings, numbers, booleans or arrays of strings |
+| `submitted_by_uid` | integer | the peer UID of the submitting process |
+| `created_at`, `expires_at` | string | RFC 3339 UTC; `expires_at − created_at` ≤ the pending ceiling (60 min) |
+
+- **Canonical form.** RFC 8785 (JSON Canonicalization Scheme) encoding of the whole envelope.
+- **Digest.** `request_digest = SHA-256(JCS(envelope))`, shown in full to the approver.
+- **Approval record.** Created separately: `{approval_id, request_id, request_digest, approver_uid, approved_at, approval_expires_at}`. `approval_expires_at − approved_at` ≤ 15 minutes.
+- **Version changes.** A future `/2` requires a new ADR amendment. A broker never interprets an envelope version it does not know.
+
+### 2.3 Execute only the stored, immutable, approved request
+
+- On `submit`, the broker validates the client's input, builds the envelope, stores it, and returns `{request_id, request_digest}`. **The stored envelope is immutable.** Changing anything requires a new request with a new `request_id` and a new approval.
+- At dispatch the broker builds the HTTP request **only from the stored envelope**, never from anything the client sends after `submit`. Immediately before reserving dispatch, it recomputes the digest and requires it to equal the approved `request_digest`; a mismatch means storage corruption, and it refuses.
+- The client cannot name the base, table, method or URL. Those come from `route`.
+
+### 2.4 At-most-once dispatch and the request state machine
+
+```
+PENDING ──approve──▶ APPROVED ──reserve──▶ DISPATCH_RESERVED ──▶ SUCCEEDED
+   │                    │                         │
+   ├─deny──▶ DENIED     ├─expire/revoke──▶ EXPIRED ├──▶ FAILED_CONFIRMED
+   └─expire─▶ EXPIRED                              └──▶ OUTCOME_UNKNOWN ──reconcile──▶ SUCCEEDED | FAILED_CONFIRMED
+```
+
+**Atomic local consumption is not the same as an atomic remote effect.**
+- What the broker *can* make atomic: approval consumption and dispatch reservation, in one local SQLite transaction (`BEGIN IMMEDIATE`; `APPROVED → DISPATCH_RESERVED`; the row records `dispatch_attempt_id` and `reserved_at`). That transaction commits durably (`synchronous=FULL`) **before** any network byte is sent.
+- What it *cannot* make atomic: the Airtable HTTPS write. That happens in another system after the commit.
+- So the guarantee is **at-most-once dispatch**, not exactly-once effect.
+
+**State transition rules:**
+- `DISPATCH_RESERVED` can be entered only from `APPROVED`, exactly once per `request_id` (`UNIQUE(request_id)` on the dispatch table). The single HTTPS request is sent only after that commit.
+- **`SUCCEEDED`:** a 2xx response with a record ID was received and committed, along with the record ID.
+- **`FAILED_CONFIRMED`:** a response was received that confirms Airtable did not apply the write. Specifically 400, 401, 403, 404, 413, 422 and 429. The response is stored.
+- **`OUTCOME_UNKNOWN`** covers every other case:
+  - a timeout or connection error after the request was sent;
+  - any 5xx;
+  - a 2xx whose body can't be parsed;
+  - a broker crash or restart while `DISPATCH_RESERVED`. On startup, every `DISPATCH_RESERVED` row without a terminal state becomes `OUTCOME_UNKNOWN`.
+- **No automatic retry, ever.** A retry is a new request: new `request_id`, new digest, new human approval.
+
+**`OUTCOME_UNKNOWN` reconciliation (approver-only).**
+1. The broker offers a read-only `reconcile <request_id>` that queries the target table:
+   - *update routes:* read `record_id` and compare each envelope field with the stored value;
+   - *create routes:* search for records whose envelope fields all match and whose `createdTime` falls in `[reserved_at, reserved_at + 10 min]`. This is exact only if the table has a dedicated `broker_request_id` field to match on. Adding that field is a schema change that needs a separate T0 decision. Without it, a create match is a candidate list for the human, not proof.
+2. The approver records the outcome with `resolve <request_id> succeeded <record_id>` or `resolve <request_id> failed`, plus a free-text reason. The resulting state is `SUCCEEDED` or `FAILED_CONFIRMED`, flagged `reconciled=true`, and the evidence goes into the audit log.
+3. An `OUTCOME_UNKNOWN` request is never re-dispatched.
+
+### 2.5 Requirements (each is a design constraint the implementation must satisfy)
 
 **R1. Human-only issuance, outside agent authority.**
-- Approvals are created only through a channel the agent's OS identity cannot use.
-- The broker accepts an approval only on its approval socket, and only when the peer's kernel-reported UID (`SO_PEERCRED` on Linux, `getpeereid`/`LOCAL_PEERCRED` on macOS) belongs to the human approver account. That account is distinct from the agent's account and never shared with it.
-- The agent's account cannot read the broker's key, state, or credential files (owner `sfx-broker`, mode `0600`, agent not in the group, no sudo).
-- Optional extra step: a local OS authentication prompt on the approver side (polkit / macOS LocalAuthentication). This is extra assurance, not the boundary.
+- Approvals are created only through `approve.sock`, and only by a peer whose kernel-reported UID (`SO_PEERCRED` on Linux, `getpeereid`/`LOCAL_PEERCRED` on macOS) is the configured approver UID.
+- The deployment meets §2.1 P1–P7.
+- Optional: a local OS authentication prompt on the approver side (polkit / macOS LocalAuthentication). This adds assurance but is not the boundary.
 
 **R2. Request-bound, single-use approval.**
-- An approval binds one exact request: route, operation (POST/PATCH), base, table, record ID (or none), the SHA-256 of the canonical JSON body, a broker-generated nonce, and an expiry.
-- The human approves *that* digest after seeing the rendered request. It does not cover a table, a scope, or a time window.
-- The broker executes the write only if the request it receives hashes to an approved, unexpired, unconsumed digest. It marks the approval consumed in the **same transaction** that records execution (SQLite, `UNIQUE(nonce)`, `BEGIN IMMEDIATE`).
-- Replaying a request, or changing any byte of it, fails.
+- An approval binds exactly one `request_digest` (§2.2) of one immutable stored envelope (§2.3). It does not cover a table, a scope or a time window.
+- It is consumed by the `APPROVED → DISPATCH_RESERVED` transition (§2.4) and can never be consumed twice.
 
-**R3. One authoritative consumer per write route.**
-- Each route (Session Ledger, ATQ, Decision Log, and any future Canon write) has exactly one executor: the broker.
-- The agent-side MCP servers become thin clients. They submit a request over the broker's request socket and wait for it to be approved and executed. They hold **no** write credential, and `airtableWrite()` is removed from agent space.
-- The hook stays as a fast user-visible pre-check, labelled advisory. Nothing depends on it for safety.
-- No route can be authorized by two independent readers that might disagree. That is the T2 class of bug, made structural.
+**R3. At-most-once dispatch with explicit unknown outcomes.** As specified in §2.4. The broker never reports `SUCCEEDED` without a received 2xx and a record ID, or a reconciliation by the approver.
 
-**R4. Alternate mutation capabilities are denied, not only unmatched.**
-- Any Canon-base credential available to the agent's identity is **read-only** (an Airtable PAT with `data.records:read` only).
-- The generic Airtable MCP, plugin-namespaced Airtable servers, and any `curl` path then *cannot* write, whatever the hook matches.
-- The same rule applies to the other protected surfaces. Supabase: no service-role key in agent environments; migrations only through `apply_migration` from a human-approved path. GitHub: branch protection on default branches.
-- Deny rules and matchers remain as defense in depth, and are documented as such.
-- **Cloud sessions** (this one included) run as root in an ephemeral container, where no separate OS identity is possible. They must never receive a Canon write credential at all.
+**R4. One authoritative consumer per Canon route.**
+- Each Canon route has exactly one executor, the broker.
+- Agent-side MCP servers become thin clients: they `submit` and poll `status`. They hold **no** write credential, and `airtableWrite()` is removed from agent space.
+- The hook stays as an advisory pre-check, and nothing depends on it.
 
-**R5. Fail-closed hook and harness behaviour.**
-- Broker: default deny. Any error, a missing approval, a broker that is down, a schema mismatch, or a clock skew beyond 60 s all mean no write.
-- Hook: exits 2 on any internal error once PR #2 merges. Because the harness treats timeouts, crashes, sessions without hooks, and permission-bypass modes as non-blocking, **no requirement may rely on the hook running**. R1 to R4 hold even if the hook never runs.
+**R5. Alternate Canon mutation capabilities are denied, not only unmatched.**
+- Any credential for base `appVftexD3KJRcdij` reachable from the agent's identity is **read-only**: an Airtable PAT with only `data.records:read` and `schema.bases:read`.
+- The generic Airtable MCP, plugin-namespaced Airtable servers and `curl` then *cannot* write to the Canon Spine, whatever the hook matches.
+- This closes T9 and T11 **for Canon routes only**. GitHub and Supabase require separate capability inventories and route-specific enforcement decisions; their T9/T11 entries stay open.
 
-**R6. Maximum TTL and human-controlled recovery.**
-- Approvals expire after at most 15 minutes. The ceiling lives in broker configuration owned by `sfx-broker`, so the agent cannot raise it.
-- Pending requests expire after 60 minutes.
-- Recovery commands run only as the approver account: `revoke <nonce>`, `revoke-all`, `rotate-credential`, `export-audit`.
-- The broker keeps an append-only audit log in its own state: request digest, approver UID, timestamps, Airtable response ID.
-- A broker crash leaves no lock to clean up: SQLite transactions replace the marker lock file.
+**R6. Fail closed, independent of the hook and the harness.**
+- The broker denies by default. Any of these means no dispatch: a validation error, a missing or expired approval, a digest mismatch, an unknown envelope version, a clock skew beyond 60 s between `created_at` and the broker clock, or the broker being down.
+- Because the harness treats hook timeouts, crashes, sessions without hooks and permission-bypass modes as non-blocking, **no requirement may rely on the hook running**.
 
-### Minimal broker shape (the recommendation)
+**R7. Maximum TTL and human-controlled recovery.**
+- Approval lifetime is ≤ 15 min, and pending request lifetime is ≤ 60 min. Both ceilings live in configuration owned by the broker account (§2.1 P4).
+- Approver-only commands: `revoke <request_id>`, `revoke-all`, `reconcile`, `resolve`, `rotate-credential`, `export-audit`.
+- The audit log is append-only and kept in the broker's own state. It records every state transition, with digest, UIDs, timestamps and the Airtable response status or record ID.
 
-- One process, about 300 lines of Python standard library, running as `sfx-broker` via a systemd user unit (Linux) or a launchd agent (macOS).
+### 2.6 Minimal broker shape (the recommendation; not implemented by this ADR)
+
+- One process, about 300–400 lines of Python standard library, running as the broker account via a systemd unit (Linux) or a launchd daemon (macOS). Its code, unit and config are owned by root or the broker account and are not writable by the agent (§2.1 P4).
 - Two Unix sockets:
-  - **`request.sock`** (agent account can connect): `submit(request) -> {request_id, digest}` and `status(request_id)`.
-  - **`approve.sock`** (approver account only, enforced by peer-UID check *and* socket file permissions): `list()`, `show(request_id)` returns the rendered request and digest, `approve(request_id, digest)`, `deny(request_id)`.
-- On approval, the broker performs the HTTPS write itself, using the only write credential, which it reads from its own `0600` file.
-- **Explicitly out of scope:** network listeners, multi-host operation, Airtable-side approval flows, and any Canon policy logic beyond binding approvals to requests.
+  - **`request.sock`** (agent may connect): `submit(route, record_id, fields) → {request_id, request_digest}` and `status(request_id)`.
+  - **`approve.sock`** (approver only, by file mode **and** peer-UID check): `list`, `show(request_id)` (rendered envelope plus full digest), `approve(request_id, request_digest)`, `deny`, `revoke`, `reconcile`, `resolve`.
+- State is a SQLite DB in WAL mode with `synchronous=FULL`, owned by the broker account.
+- **Explicitly out of scope:**
+  - network listeners and multi-host operation;
+  - GitHub and Supabase routes;
+  - Airtable-side approval flows;
+  - any Canon policy beyond binding approvals to requests.
 
 ## 3. Alternatives considered
 
@@ -84,34 +165,80 @@ Move write authority out of the agent's OS identity into a **minimal local broke
 |---|---|
 | Status quo plus deny rules on the marker path and issuer | Deny rules sit in the agent's identity, and the harness fails open past them (timeouts, no hooks, bypass modes). The write credential is still in agent space. |
 | HMAC-signed markers | The verifier needs the same secret, so whoever can verify can also mint. And the credential is still in agent space. |
-| Ed25519-signed markers (verify-only key in agent space) | This removes self-minting, but not "call Airtable directly with the key". It only works once the credential has moved out, and at that point the broker is the simpler design. |
+| Ed25519-signed markers (verify-only key in agent space) | This removes self-minting, but not "call Airtable directly with the key". It only helps once the credential has moved out, and at that point the broker is the simpler design. |
+| Broker that retries on timeout ("exactly-once") | Airtable writes are not idempotent and Airtable offers no idempotency key, so a retry after an ambiguous timeout can duplicate a create. That is rejected in favour of at-most-once with `OUTCOME_UNKNOWN`. |
 | Airtable-native approvals (automations, interfaces) | External, harder to test offline, and it ties the policy to one vendor. Could complement the broker later. |
 | Hardware key per write | Strong. Can be layered onto R1 as the approver-side step. On its own it doesn't address where the credential lives. |
 
 ## 4. Consequences
 
-- **Good:**
-  - The agent can no longer write the Canon Spine without a human approving the exact request.
-  - The T9, T10, T11 and T12 gaps stop mattering for safety, because they reduce to "the agent's tools fail".
+- **Good:** on a deployment that meets §2.1:
+  - the agent can no longer write the Canon Spine without a human approving the exact stored request;
+  - each approval leads to at most one dispatch;
+  - ambiguous outcomes are surfaced instead of being retried.
+- **Not changed:** GitHub and Supabase routes. Their gaps remain open until their own inventories and decisions exist.
 - **Cost:**
-  - One more process and one more OS account on the human's machine.
+  - One more process and two more OS accounts (broker and agent), separate from the human approver.
   - Writes become two-step (submit, then approve).
-  - Cloud and agent-only sessions can no longer write Canon at all, by design.
-- **Migration:** the marker file is retired for Canon routes. `issue_t0_go.py` is removed once the broker is live.
+  - Some writes end as `OUTCOME_UNKNOWN` and need manual reconciliation.
+  - Cloud and root-agent sessions can no longer write Canon at all, by design.
+- **Migration:** the marker file is retired for Canon routes, and `issue_t0_go.py` is removed once the broker is live on every consumer.
 
 ## 5. Rollout preconditions (do not start until these hold)
 
-1. **Consumer inventory confirmed by T0.** As of 2026-10-23, a full-tree search of all 53 checkouts available to the authoring session, plus every `.claude/settings*.json` and MCP config in them, found no consumer of these hooks or servers. GitHub code search does not index these private repos, so that result is not evidence of absence. Any local installs on T0's machines have to be listed by T0.
-2. **Write PATs inventoried and narrowed.** Every current Canon write-capable credential is listed and scoped. This needs Airtable access, which is currently blocked by the monthly limit.
-3. **This ADR ratified** through the Promote-Gate (`Shadowfox-OS-Specification-Repository/docs/promote-gates/`). Until then it is a proposal.
+1. **Consumer inventory confirmed by T0.** As of 2026-10-23, a full-tree search of all 53 checkouts available to the authoring session, plus every `.claude/settings*.json` and MCP config in them, found no consumer of these hooks or servers. GitHub code search does not index these private repos, so that result is not evidence of absence. Local installs on T0's machines have to be listed by T0.
+2. **Canon write credentials inventoried and narrowed.** This needs Airtable access, which is currently blocked by the monthly limit.
+3. **§6.1 privilege-boundary checks pass on each target host.** They are recorded before any write credential is provisioned there.
+4. **A schema decision on `broker_request_id`** for exact create reconciliation (§2.4), or explicit acceptance that create reconciliation is candidate-based.
+5. **This ADR ratified** through the Promote-Gate (`Shadowfox-OS-Specification-Repository/docs/promote-gates/`). Until then it is a proposal.
 
-## 6. Verification plan (for the implementation PR, not this ADR)
+## 6. Acceptance tests (for the implementation PR, not this ADR)
 
-Offline tests, extending the test harness from PR #2:
-- **Approval-socket UID check:** a peer UID other than the approver is refused.
-- **Digest binding:** one changed body byte gives a refusal.
-- **Single use:** concurrent approve and execute run once.
-- **TTL:** the ceiling is enforced.
-- **Fail-closed paths:** broker down, malformed request.
-- **No write credential in agent space:** a static check that no agent-side module imports a write function, and that the agent-side env has no write PAT.
-- Every `known_gap` test is either converted into an acceptance test against the broker or deleted with its gap closed.
+All offline. Airtable is replaced by a local mock HTTPS server that counts the requests it receives.
+
+### 6.1 Privilege boundary
+
+These run in CI on Linux with three throwaway accounts (`sfx-broker`, `sfx-approver`, `sfx-agent`) created by the test, and as a read-only preflight script on a real target host:
+- **Credential and state:** as `sfx-agent`, reading the credential file, the state DB and the config gives `EACCES`. Writing the broker code, unit, config and socket directory also gives `EACCES`.
+- **Approval socket:** as `sfx-agent`, connecting to `approve.sock` gives `EACCES`. With the file mode deliberately loosened, the broker still refuses on the peer-UID check, and nothing is approved.
+- **Process isolation:** as `sfx-agent`, `kill -0 <broker pid>` gives `EPERM`. `ptrace`/`/proc/<pid>/mem` access fails (asserted when Yama `ptrace_scope ≥ 1`; the test reports it as unverified otherwise).
+- **Preflight:** it fails if `sfx-agent` is uid 0 or has any sudo rule (`sudo -n -l`). It also fails on membership in `docker`/`lxd`/`libvirt`/`disk`/`wheel`/`sudo`/`admin`, effective capabilities other than none, or Claude Code running as the approver UID.
+- **Approver path:** as `sfx-approver`, `approve` succeeds only with the exact full digest. A truncated or altered digest is refused.
+
+### 6.2 Envelope and immutability
+
+- JCS canonicalization is deterministic across key order, Unicode escaping and number formatting.
+- An unknown `envelope_version` is refused.
+- A client-supplied base, table, method or URL is ignored or refused.
+- A one-byte change in `fields` gives a different digest.
+- Corrupting the stored envelope after approval makes dispatch refuse: the digest recheck fails and the mock server receives 0 requests.
+
+### 6.3 At-most-once and crash recovery
+
+The broker is killed with `SIGKILL` at each injected fault point and then restarted:
+
+| Fault point | Expected state after restart | Mock server requests |
+|---|---|---|
+| after `approve` commit, before reservation | `APPROVED` (dispatchable once) | 0 |
+| after reservation commit, before send | `OUTCOME_UNKNOWN` | 0 |
+| after send, before response | `OUTCOME_UNKNOWN` | 1 |
+| after 2xx received, before terminal commit | `OUTCOME_UNKNOWN` | 1 |
+| after terminal commit | unchanged terminal state | 1 |
+
+- Restarting twice changes nothing further.
+- In no case does the mock server receive a second request for the same `request_id`.
+- **Concurrency:** 8 concurrent `dispatch` attempts on one `APPROVED` request give exactly 1 reservation and at most 1 request.
+- **Mock responses:**
+  - 400, 422 and 429 map to `FAILED_CONFIRMED`;
+  - 500, 503, a timeout after send, and a 2xx with an unparseable body map to `OUTCOME_UNKNOWN`;
+  - none of them is retried.
+- **Reconciliation:**
+  - `reconcile` on an update route reports field matches correctly;
+  - `resolve` is refused from a non-approver UID;
+  - a reconciled request cannot be dispatched again.
+
+### 6.4 Carried over
+
+- **TTL:** both ceilings are enforced, and the agent cannot change them (P4).
+- **No write credential in agent space:** a static check that no agent-side module imports a write function, and that the agent-side environment has no Canon write PAT.
+- **Known-gap tests:** every Canon-route `known_gap` test is converted into a broker acceptance test or deleted with its gap closed. The GitHub and Supabase `known_gap` tests stay, because this ADR doesn't close them.
