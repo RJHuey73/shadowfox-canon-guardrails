@@ -45,9 +45,21 @@ defends against. It is not a statement of Canon policy.
 | T7 | A Canon-base Airtable call with a malformed `baseId`/`tableId` (non-string) crashes or skips the hook | **Observed** (crash = fail-open) | Blocks. |
 | T8 | Formula injection in `decisionlog_search` via `\"` | **Observed**: backslash not escaped | Backslash escaped first. Read-only impact only. |
 | T9 | Replay on hook-only write paths (GitHub, Supabase, generic Airtable MCP, Bash): the hook never consumes, so one marker allows unlimited calls within its TTL | **Observed**, and by design (documented) | **Not changed — authorization-model decision, flagged for T0.** Test pins current behaviour. |
-| T10 | The agent mints its own marker: Write/Edit tool or `echo >` to the marker path, or runs `issue_t0_go.py` via Bash | **Observed by code reading**: nothing guards the marker path or the issuer | **Not changed — flagged for T0.** This is the main unresolved trust assumption. |
+| T10 | The agent mints its own marker: Write/Edit tool or `echo >` to the marker path, or runs `issue_t0_go.py` via Bash | **Observed**: nothing guards the marker path or the issuer (`test_known_gaps.py::test_gap_t10_*`) | **Not changed — flagged for T0.** This is the main unresolved trust assumption. |
 | T11 | Write-capable tools outside the matcher set: `mcp__Airtable__submit_form`, `revert_action`, plugin-namespaced Airtable tools (`mcp__plugin_airtable_airtable__*`), `mcp__Supabase__execute_sql` and other Supabase mutators, GitHub `create_branch`/`enable_pr_auto_merge`/…, Bash `curl -X PATCH` to the Airtable API | **Observed** (tool names from this environment's live tool list) | **Not changed — expanding coverage is policy, flagged.** Tests pin current behaviour. |
 | T12 | Undecodable stdin to the hook is allowed | Documented design choice | Kept, flagged. A non-object JSON payload now takes the same documented path explicitly instead of crashing. |
+
+## What a marker does and does not prove
+
+An unsigned marker file proves only that some process able to write the
+marker path wrote it. It does **not** prove human authorization, and adding
+deny rules (hook matchers on the path or the issuer) would not change that:
+deny rules narrow which tools an agent can use, they are not an identity
+boundary, and they fail open whenever the harness does (a crash, a timeout,
+a session started without the hooks). Human-only issuance needs a boundary
+the agent's OS identity cannot cross; that design is being proposed
+separately as an ADR and is not part of this change. Tests that pin these gaps are in `tests/python/test_known_gaps.py`
+(marked `known_gap`) and are kept apart from the security acceptance tests.
 
 ## Trust assumptions that remain
 

@@ -1,7 +1,10 @@
-"""hooks/pre_tool_guard.py run as Claude Code runs it: PreToolUse JSON on
+"""Security acceptance tests: hooks/pre_tool_guard.py run as Claude Code runs it: PreToolUse JSON on
 stdin, decision in the exit code. 2 blocks; Claude Code treats every other
 exit code (including a crash's exit 1) as non-blocking, so the call goes
-through. Tests therefore assert the exact exit code."""
+through. Tests therefore assert the exact exit code.
+
+Behaviour that is known to be unsafe but deliberately not changed lives in
+test_known_gaps.py, not here."""
 
 import json
 import re
@@ -32,15 +35,13 @@ def write_marker(path, marker):
 
 # --- malformed hook input ---------------------------------------------------
 
-def test_undecodable_stdin_is_allowed_as_documented(run_hook):
-    # Documented fail-open for harness parsing bugs (flagged for T0 review).
-    assert run_hook(None, raw_stdin="{not json").returncode == ALLOW
-
-
 @pytest.mark.parametrize("raw", ["[]", "null", "42", '"Bash"'])
-def test_non_object_payload_takes_the_documented_path_without_crashing(run_hook, raw):
+def test_non_object_payload_does_not_crash_the_hook(run_hook, raw):
+    # A crash (exit 1) is an unintended fail-open. Which deliberate exit code
+    # this input gets is the documented T12 decision, pinned in
+    # test_known_gaps.py.
     proc = run_hook(None, raw_stdin=raw)
-    assert proc.returncode == ALLOW
+    assert proc.returncode in (ALLOW, BLOCK)
     assert "Traceback" not in proc.stderr
 
 
@@ -60,9 +61,9 @@ def test_malformed_input_on_a_guarded_tool_blocks(run_hook, payload):
     assert "Traceback" not in proc.stderr
 
 
-def test_non_string_tool_name_is_allowed_without_crashing(run_hook):
+def test_non_string_tool_name_does_not_crash_the_hook(run_hook):
     proc = run_hook({"tool_name": 7, "tool_input": {}})
-    assert proc.returncode == ALLOW and "Traceback" not in proc.stderr
+    assert proc.returncode in (ALLOW, BLOCK) and "Traceback" not in proc.stderr
 
 
 @pytest.mark.parametrize("raw", ["[1]", "null", '"x"'])
@@ -108,13 +109,6 @@ def test_sql_write_naming_only_the_canon_base_is_gated_on_the_base(run_hook, mar
 
 def test_supabase_ref_with_write_keyword_is_gated(run_hook):
     assert run_hook(bash("psql mksmwqmphdkwwiyfesad -c 'DELETE FROM x'")).returncode == BLOCK
-
-
-def test_documents_gap_http_verbs_are_not_write_keywords(run_hook):
-    # T11, flagged not fixed: a raw REST write to a protected table without
-    # any SQL keyword is not gated by the Bash guard.
-    cmd = f"curl -X PATCH https://api.airtable.com/v0/{CANON_BASE}/{SESSION}/recXXXXXXXXXXXXXX"
-    assert run_hook(bash(cmd)).returncode == ALLOW
 
 
 # --- MCP tool-name matching ------------------------------------------------
@@ -196,33 +190,7 @@ def test_absent_base_id_is_not_gated(run_hook):
     assert run_hook(mcp("mcp__Airtable__create_base", workspaceId="wspZfrNIUEip5MazD")).returncode == ALLOW
 
 
-# --- replay on hook-only write paths (T9, flagged not fixed) -----------------
-
-@pytest.mark.parametrize("tool", ["mcp__github__push_files", "mcp__Supabase__apply_migration"])
-def test_documents_gap_hook_only_paths_never_consume_the_marker(run_hook, marker_path, tool):
-    scope = "github:write" if "github" in tool else "supabase:apply_migration"
-    write_marker(marker_path, valid_marker([scope]))
-    before = marker_path.read_text()
-    assert [run_hook(mcp(tool)).returncode for _ in range(3)] == [ALLOW, ALLOW, ALLOW]
-    assert marker_path.read_text() == before
-
-
-# --- matcher coverage against real tool names (T11, flagged not fixed) -------
-
-UNGATED_WRITE_CAPABLE = [
-    mcp("mcp__Airtable__submit_form", baseId=CANON_BASE, pageId="pagXXXXXXXXXXXXXX"),
-    mcp("mcp__Airtable__revert_action", baseId=CANON_BASE, actionId="actXXXXXXXXXXXXXX"),
-    mcp("mcp__plugin_airtable_airtable__create_records_for_table", baseId=CANON_BASE, tableId=SESSION),
-    mcp("mcp__Supabase__execute_sql", query="DROP TABLE x"),
-    mcp("mcp__github__create_branch"),
-    mcp("mcp__github__enable_pr_auto_merge"),
-]
-
-
-@pytest.mark.parametrize("payload", UNGATED_WRITE_CAPABLE, ids=[p["tool_name"] for p in UNGATED_WRITE_CAPABLE])
-def test_documents_gap_write_capable_tools_outside_the_matchers(run_hook, payload):
-    assert run_hook(payload).returncode == ALLOW
-
+# --- configuration consistency -------------------------------------------
 
 def test_settings_matchers_route_exactly_the_hooks_write_patterns(guard):
     """config/settings.json.example decides which tool calls reach the hook
@@ -231,9 +199,10 @@ def test_settings_matchers_route_exactly_the_hooks_write_patterns(guard):
     calls the hook silently allows."""
     settings = json.loads((REPO / "config" / "settings.json.example").read_text())
     matchers = [re.compile(f"^(?:{e['matcher']})$") for e in settings["hooks"]["PreToolUse"]]
-    names = [p["tool_name"] for p, _, _ in GATED_TOOLS] + [p["tool_name"] for p in UNGATED_WRITE_CAPABLE] + [
+    names = [p["tool_name"] for p, _, _ in GATED_TOOLS] + [
         "mcp__github__create_or_update_file", "mcp__github__delete_file", "mcp__Airtable__update_field",
         "mcp__Airtable__list_records_for_table", "mcp__sfx-session-mcp__session_get", "Bash", "Write", "Edit",
+        "mcp__Airtable__submit_form", "mcp__Supabase__execute_sql", "mcp__github__create_branch",
     ]
     for name in names:
         routed = any(m.match(name) for m in matchers)

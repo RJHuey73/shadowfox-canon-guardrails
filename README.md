@@ -56,8 +56,13 @@ before touching the network. The check is fail-closed:
 A successful check marks the marker consumed, so it can't be replayed. This
 is deliberately **not** a standing flag — that would just be a new
 bypassable checkbox, the exact weakness this was built to close.
-`issue_t0_go.py` is the only writer of that file, and it's a human-run
-script, never something a session should be able to invoke on itself.
+`issue_t0_go.py` is the only *intended* writer of that file, and it is meant
+to be human-run. **Nothing enforces that.** The marker is an unsigned file in
+the session's working directory: an agent session that can write files or run
+Bash can create one or run the issuer itself (pinned in
+`tests/python/test_known_gaps.py`). A marker is therefore evidence that
+*someone* wrote it, not proof that a human authorized the write; see
+`docs/THREAT-MODEL.md` (T10).
 
 **Two tiers, adopted 2026-09-05.** Session Ledger and ATQ writes are Tier 1
 (operational) — the default. `decisionlog_create_entry` requires Tier 2
@@ -100,7 +105,8 @@ temp directories, and no credential is needed.
 ```bash
 npm ci && npm test                  # node:test — marker contract + MCP tool handlers over stdio
 pip install pytest
-python3 -m pytest tests/python -q   # hook entrypoint + marker contract
+python3 -m pytest -q -m "not known_gap"   # security acceptance: hook, harness boundary, marker contract
+python3 -m pytest -q -m known_gap         # KNOWN GAPS: pins unfixed behaviour, not acceptance
 ```
 
 ## Field IDs, not names

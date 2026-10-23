@@ -37,4 +37,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install pytest
-      - run: python -m pytest tests/python -q
+      - name: security acceptance tests
+        run: python -m pytest -q -m "not known_gap"
+      - name: known gaps (pins unfixed behaviour; NOT acceptance)
+        run: python -m pytest -q -m known_gap

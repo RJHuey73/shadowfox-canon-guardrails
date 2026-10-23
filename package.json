@@ -13,7 +13,8 @@
     "start:atq": "node mcp/sfx-atq-mcp.js",
     "start:decisionlog": "node mcp/sfx-decisionlog-mcp.js",
     "test": "node --test tests/js/*.test.mjs",
-    "test:py": "python3 -m pytest tests/python -q"
+    "test:py": "python3 -m pytest -q -m \"not known_gap\"",
+    "test:py:known-gaps": "python3 -m pytest -q -m known_gap"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
