@@ -1,46 +1,23 @@
 {
+  "_comment": "EXAMPLE ONLY - not installed by this repo. Replace /ABSOLUTE/PATH/TO/shadowfox-canon-guardrails with the real absolute path before use. The path must be absolute: with a relative path the hook runs only when the working directory happens to be this repo (otherwise the interpreter fails with exit 2). The matchers route every Bash call, every file-write tool and EVERY MCP tool through the hook so that unclassified MCP operations are denied by policy; do not narrow 'mcp__.*' to a list of names.",
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+          { "type": "command", "command": "python3 \"/ABSOLUTE/PATH/TO/shadowfox-canon-guardrails/hooks/pre_tool_guard.py\"" }
         ]
       },
       {
-        "matcher": "mcp__Airtable__(create|update|delete)_.*",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+          { "type": "command", "command": "python3 \"/ABSOLUTE/PATH/TO/shadowfox-canon-guardrails/hooks/pre_tool_guard.py\"" }
         ]
       },
       {
-        "matcher": "mcp__github__(push_files|create_or_update_file|delete_file|merge_pull_request)",
+        "matcher": "mcp__.*",
         "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
-        ]
-      },
-      {
-        "matcher": "mcp__Supabase__apply_migration",
-        "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
-        ]
-      },
-      {
-        "matcher": "mcp__sfx-session-mcp__(session_open|session_close)",
-        "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
-        ]
-      },
-      {
-        "matcher": "mcp__sfx-atq-mcp__(atq_create_task|atq_update_task)",
-        "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
-        ]
-      },
-      {
-        "matcher": "mcp__sfx-decisionlog-mcp__decisionlog_create_entry",
-        "hooks": [
-          { "type": "command", "command": "python3 hooks/pre_tool_guard.py" }
+          { "type": "command", "command": "python3 \"/ABSOLUTE/PATH/TO/shadowfox-canon-guardrails/hooks/pre_tool_guard.py\"" }
         ]
       }
     ]

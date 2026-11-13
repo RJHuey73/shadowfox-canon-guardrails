@@ -37,7 +37,7 @@ scaffold contained.
 | `mcp/sfx-atq-mcp.js` | Write-scoped to Active Task Queue (`tblsVXX2XnhVLWMVE`) only. New — closes gap #1 from the 2026-09-03 session review. |
 | `mcp/sfx-decisionlog-mcp.js` | Write-scoped to T0 Decision Log (`tblX88U1VOwmK2fF5`) only. New — closes gap #1. |
 | `mcp/lib/airtable-client.js` | Shared HTTP + T0-GO-check helper. Table/base IDs are always passed in by the *caller's* hardcoded constants, never taken from tool input — this is what keeps the shared code from becoming a "write to any table" backdoor. |
-| `hooks/pre_tool_guard.py` | `PreToolUse` hook. Bash-surface regex guard (destructive commands, named Canon/Supabase surfaces — now including ATQ + Decision Log) **plus** MCP tool-name matching, so non-Bash write surfaces (Airtable MCP, `gh`-equivalent GitHub MCP calls, Supabase `apply_migration`) are covered too — closes gap #4. |
+| `hooks/pre_tool_guard.py` | `PreToolUse` hook. Denies (exit 2) malformed input and any internal error; classifies MCP operations as read-only (allowed), protected (need a scoped T0-GO marker) or unclassified (denied); best-effort Bash and file-write checks. See "Operation policy" below. This is local input/policy hardening, **not** closure of G1. |
 | `hooks/issue_t0_go.py` | Human-run CLI that mints a single-use, TTL-scoped GO marker. **Never invoke this from an agent session** — it exists specifically so the marker can only originate from a human at a keyboard. |
 | `config/settings.json.example` | Example `.claude/settings.json` wiring showing the hook matchers, including the non-Bash MCP tool names. |
 
@@ -93,6 +93,66 @@ cp .env.example .env   # set AIRTABLE_API_KEY
 
 Wire hooks into a consuming repo's `.claude/settings.json` — see
 `config/settings.json.example`.
+
+## Operation policy (local hook hardening, 2026-11-13)
+
+Adopted under an owner-approved local scope (Envelope A). Status: implemented
+and unit-tested locally; **not installed anywhere, not live-tested, not a G1
+closure**.
+
+| Input | Result |
+|---|---|
+| Empty, non-UTF-8, non-JSON, non-object, missing/invalid `tool_name` or `tool_input`, wrong-typed tool fields | **Deny**, exit 2, with a coded diagnostic |
+| Any internal error (including an unreadable stdin) | **Deny**, exit 2 (Claude Code treats exit 1 as non-blocking, so the hook never lets one escape) |
+| MCP tool in `READ_ONLY_RULES` (exact names) | Allow |
+| MCP tool in `PROTECTED_RULES` | Allow only with a valid, in-scope, in-tier, unexpired, unconsumed marker; otherwise deny |
+| Any other `mcp__*` tool | **Deny** (`UNCLASSIFIED_MCP`) until someone classifies it in the hook (reviewed change) |
+| Bash | Destructive patterns, mutating calls naming a Canon table/base or Supabase ref, and any reference to the marker file, `T0_GO_MARKER_PATH`, or execution of the issuer → deny / marker required |
+| Write, Edit, MultiEdit, NotebookEdit | Deny when the target is the marker (including via symlink or the configured marker path) |
+| Other built-in tools (Read, Glob, WebFetch, ...) | Outside this policy; allowed |
+
+Protected scopes introduced here: `github:create_pull_request`,
+`claude-code-remote:create_trigger`, `claude-code-remote:send_later`.
+Classifying an operation as protected only means it *can* be authorized; it
+does not authorize it.
+
+**Deliberately unclassified (denied, not authorizable here):** Supabase
+`execute_sql` (raw SQL; the project rule is `apply_migration` only), other
+Supabase mutations, `claude-code-remote` `update_trigger` / `delete_trigger` /
+`fire_trigger`, GitHub writes other than the five listed in the hook, and every
+server not listed in the hook.
+
+**Unverified:** the Airtable read-only names (`list_bases`,
+`list_tables_for_base`, `list_records_for_table`) and the `baseId` / `tableId`
+input names were not checked against a live Airtable MCP server (it was
+unreachable). If they differ, those calls are denied until corrected.
+
+### Known uncovered routes (do not read the hook as a boundary)
+
+- The marker is a local file. An agent with filesystem access and a way to
+  obfuscate a shell command can still create one. Two such cases are recorded
+  as expected-failure tests (`TestKnownUncoveredRoutes`).
+- `github:write` and `supabase:...` scopes are checked but never consumed by
+  anything, so a marker for them is replayable until it expires. Only the MCP
+  servers in `mcp/` consume markers.
+- Anything that holds a write credential and does not go through the hook
+  (`curl` with a token in the environment, `gh`, `git push`, scripts that make
+  HTTP calls, other Claude Code sessions) is outside coverage. The hook sees
+  tool calls, not network effects.
+- Hook installation, the matchers in the settings example, and the absolute
+  hook path are the consumer's responsibility. Nothing here installs a hook.
+- Check-then-consume in `mcp/lib/airtable-client.js` is not atomic. That file
+  was not changed.
+
+### Tests
+
+```bash
+python3 -m unittest discover -s tests -v     # stdlib only; no network, no credentials
+```
+
+All tests run against temporary directories and an isolated
+`T0_GO_MARKER_PATH`. Payloads in `tests/fixtures/probes.json` are synthetic
+strings the hook reads as data; nothing in them is executed.
 
 ## What this repo does not do
 

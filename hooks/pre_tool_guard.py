@@ -1,68 +1,80 @@
 #!/usr/bin/env python3
 """
-pre_tool_guard.py — Claude Code PreToolUse hook.
+pre_tool_guard.py — Claude Code PreToolUse hook (local input/policy hardening).
 
 Fresh implementation of a described pattern (see repo README "Provenance"
 section) — not a verified patch to unseen original source.
 
-Reads the PreToolUse JSON payload on stdin, blocks (exit 2, reason on
-stderr) or allows (exit 0) the pending tool call. Two independent checks:
+Contract: read one PreToolUse JSON payload on stdin; exit 0 to allow, exit 2
+to deny with an actionable diagnostic on stderr. Every other outcome is also
+exit 2: malformed input, structurally invalid input, an unreadable or
+malformed marker, and any internal error. (Claude Code treats exit 1 as a
+NON-blocking error, so this file never lets an uncaught exception escape.)
 
-  1. Bash-surface guard (the described original's own scope): destructive
-     shell patterns, and named-surface protection for the Canon Spine base +
-     both Supabase project refs when a write-shaped SQL keyword co-occurs.
-     Extended here to also name the Active Task Queue and T0 Decision Log
-     table IDs, per gap #1 from the 2026-09-03 session review.
+Policy (adopted for this hardening pass; see README "Operation policy"):
 
-  2. MCP tool-name guard (new — closes gap #4: the described original only
-     covered Bash, but the highest-traffic write surfaces in this engagement
-     were Airtable MCP calls and GitHub MCP pushes, neither of which are
-     Bash). Matches write-shaped MCP tool names and, where the target is
-     identifiable, requires a valid T0-GO marker before allowing the call
-     through.
+  * Explicitly classified READ-ONLY MCP operations are allowed.
+  * Explicitly classified PROTECTED operations require a valid T0-GO marker
+    scoped to the operation (this hook only checks the marker; it never
+    consumes it — the MCP servers do the authoritative consuming check).
+  * Every other MCP operation is DENIED pending classification. To classify
+    one, edit READ_ONLY_RULES or PROTECTED_RULES below (a reviewed change).
+  * Bash: destructive patterns, writes to named Canon/Supabase surfaces, and
+    commands that touch the T0-GO marker or its issuer are checked. These
+    shell-pattern checks are best-effort and are NOT an authorization
+    boundary (see README "Known uncovered routes").
+  * File-write tools (Write/Edit/MultiEdit/NotebookEdit) are denied when the
+    target is the T0-GO marker. Other built-in (non-MCP) tools are outside
+    this policy and are allowed.
 
-This hook's T0-GO check is READ-ONLY (does not mark the marker consumed) —
-it's a fast, user-visible first line of defense. The MCP servers in mcp/ do
-the authoritative, consuming check themselves via requireT0Go() in
-lib/airtable-client.js, so gating still holds even on a session where this
-hook isn't wired up. Keep the marker file format identical between the two
-implementations (see README) — this file and lib/airtable-client.js are two
-independent readers of the same on-disk contract, not one calling the other.
+This is local input/policy hardening. It does not close G1: the marker is
+still a local file, and an agent that holds a write credential can reach the
+protected surface by routes this hook does not see.
 """
+
+from __future__ import annotations
 
 import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 CANON_BASE_ID = "appVftexD3KJRcdij"
 
 PROTECTED_TABLES = {
     "tbltw4Jy0LHWWz5DL": "Canon ID Registry",
     "tblEZ6ctzSoTBsfCW": "Session Ledger",
-    "tblsVXX2XnhVLWMVE": "Active Task Queue",  # added, gap #1
-    "tblX88U1VOwmK2fF5": "T0 Decision Log",  # added, gap #1
+    "tblsVXX2XnhVLWMVE": "Active Task Queue",
+    "tblX88U1VOwmK2fF5": "T0 Decision Log",
 }
 
-# Scopes that require a Tier 2 (governance-class) marker, not just Tier 1
-# (operational). Two-tier markers adopted 2026-09-05 — see
-# mcp/sfx-decisionlog-mcp.js header comment for why Decision Log specifically.
-# A plain Tier 1 marker never satisfies these, even if scoped correctly.
+# Scopes that require a Tier 2 (governance-class) marker, not just Tier 1.
 TIER_2_SCOPES = {"tblX88U1VOwmK2fF5"}  # T0 Decision Log
 
-# Per find_go_scope_for_mcp "kind" -> minimum tier required.
-KIND_MIN_TIER = {"sfx_decisionlog": 2}
-
-# Both Supabase project refs, as referenced in this session's own live
-# Airtable queries (TQ-023/TQ-024 DROP SCHEMA records) — not invented here.
 SUPABASE_REFS = {"mksmwqmphdkwwiyfesad", "oufyfdhjjvhrseythgrr"}
+
+MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
+FUTURE_SKEW = timedelta(seconds=60)
+DEFAULT_MARKER_PATH = ".claude/t0-go.json"
 
 WRITE_KEYWORDS = re.compile(r"\b(DELETE|DROP|TRUNCATE|UPDATE|INSERT)\b", re.IGNORECASE)
 
+# Mutating HTTP / client shapes. Only consulted together with a named
+# protected surface, so a stray "-d" elsewhere does not matter.
+HTTP_MUTATION = re.compile(
+    r"(?:^|\s)(?:-X|--request)[\s=]*(?:POST|PUT|PATCH|DELETE)\b"
+    r"|(?:^|\s)--method[\s=]*(?:POST|PUT|PATCH|DELETE)\b"
+    r"|(?:^|\s)(?:-d|--data|--data-raw|--data-binary|--data-urlencode|--json|-F|--form|-T|--upload-file|--post-data|--post-file)(?:\s|=|$)"
+    r"|\.(?:post|put|patch|delete)\(",
+    re.IGNORECASE,
+)
+
 DESTRUCTIVE_BASH_PATTERNS = [
-    re.compile(r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f\b"),  # rm -rf, rm -fr, rm -Rf, ...
+    re.compile(r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f\b"),
     re.compile(r"\bsudo\s+rm\b"),
     re.compile(r"\bchmod\s+777\b"),
     re.compile(r">\s*/etc/"),
@@ -71,165 +83,393 @@ DESTRUCTIVE_BASH_PATTERNS = [
     re.compile(r"\bTRUNCATE\s+TABLE\b", re.IGNORECASE),
 ]
 
-# MCP tool-name patterns that indicate a write-capable call. Each entry is
-# (regex, kind) where kind tells us how to find the target scope string.
-MCP_WRITE_PATTERNS = [
-    (re.compile(r"^mcp__Airtable__(create|update|delete)_"), "airtable_generic"),
-    (re.compile(r"^mcp__github__(push_files|create_or_update_file|delete_file|merge_pull_request)$"), "github"),
-    (re.compile(r"^mcp__Supabase__apply_migration$"), "supabase"),
-    (re.compile(r"^mcp__sfx-session-mcp__(session_open|session_close)$"), "sfx_session"),
-    (re.compile(r"^mcp__sfx-atq-mcp__(atq_create_task|atq_update_task)$"), "sfx_atq"),
-    (re.compile(r"^mcp__sfx-decisionlog-mcp__decisionlog_create_entry$"), "sfx_decisionlog"),
-]
+# Authorization material: the marker file, its location override, its issuer.
+MARKER_FILENAME_RE = re.compile(r"t0-go\.json", re.IGNORECASE)
+MARKER_ENV_RE = re.compile(r"T0_GO_MARKER_PATH")
+ISSUER_EXEC_RE = re.compile(
+    r"\b(?:python3?|py|sh|bash)\b[^|;&\n]*\bissue_t0_go\b"
+    r"|(?:^|[;&|(]\s*)(?:\./|/|~/)?[\w./~-]*issue_t0_go\.py",
+    re.IGNORECASE,
+)
 
-GO_MARKER_PATH = Path(os.environ.get("T0_GO_MARKER_PATH", ".claude/t0-go.json"))
+FILE_WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+FILE_PATH_FIELDS = ("file_path", "notebook_path")
 
-
-def block(reason: str) -> None:
-    sys.stderr.write(reason + "\n")
-    sys.exit(2)
+MCP_NAME_RE = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$")
 
 
-def allow() -> None:
-    sys.exit(0)
+# --------------------------------------------------------------------------
+# Deny plumbing
+# --------------------------------------------------------------------------
 
 
-def check_bash(command: str) -> None:
-    for pattern in DESTRUCTIVE_BASH_PATTERNS:
-        if pattern.search(command):
-            block(
-                f"pre_tool_guard: blocked destructive Bash pattern ({pattern.pattern}) "
-                f"in command: {command!r}"
-            )
+class Deny(Exception):
+    """A deliberate denial. `code` is stable and test-visible."""
 
-    if not WRITE_KEYWORDS.search(command):
-        return
+    def __init__(self, code: str, message: str, hint: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.hint = hint
 
-    # Scope must be a STABLE identifier a human can pre-mint a marker for —
-    # never raw/truncated command text, which no marker could ever match.
-    matched_scopes = set()
-    for table_id in PROTECTED_TABLES:
-        if table_id in command:
-            matched_scopes.add(table_id)
-    for ref in SUPABASE_REFS:
-        if ref in command:
-            matched_scopes.add(f"supabase:{ref}")
-    if CANON_BASE_ID in command and not matched_scopes:
-        # Base mentioned but no specific known table matched — still gate,
-        # using the base ID itself as the scope a marker must cover.
-        matched_scopes.add(CANON_BASE_ID)
-
-    for scope in matched_scopes:
-        min_tier = 2 if scope in TIER_2_SCOPES else 1
-        check_t0_go(scope, min_tier=min_tier)
+    def render(self) -> str:
+        text = f"pre_tool_guard: DENY [{self.code}] {self.message}"
+        if self.hint:
+            text += f" — {self.hint}"
+        return text
 
 
-def find_go_scope_for_mcp(tool_name: str, tool_input: dict, kind: str):
-    """Return the scope string requireT0Go should check, or None if the
-    target can't be identified (in which case we fail closed anyway — an
-    unidentifiable write-shaped call is exactly the case this exists for)."""
-    if kind == "airtable_generic":
-        base_id = tool_input.get("baseId")
-        table_id = tool_input.get("tableId")
-        if base_id == CANON_BASE_ID:
-            return table_id or CANON_BASE_ID
-        return None  # write to some other, non-Canon base — not this hook's concern
-    if kind == "github":
-        return "github:write"
-    if kind == "supabase":
-        return "supabase:apply_migration"
-    if kind == "sfx_session":
-        return "tblEZ6ctzSoTBsfCW"
-    if kind == "sfx_atq":
-        return "tblsVXX2XnhVLWMVE"
-    if kind == "sfx_decisionlog":
-        return "tblX88U1VOwmK2fF5"
+def marker_path() -> Path:
+    # Same contract as mcp/lib/airtable-client.js: env override, else a path
+    # relative to the working directory.
+    return Path(os.environ.get("T0_GO_MARKER_PATH") or DEFAULT_MARKER_PATH)
+
+
+# --------------------------------------------------------------------------
+# Input parsing
+# --------------------------------------------------------------------------
+
+
+def parse_payload(raw: bytes) -> tuple[str, dict[str, Any]]:
+    if len(raw) > MAX_PAYLOAD_BYTES:
+        raise Deny("PAYLOAD_TOO_LARGE", f"hook payload exceeds {MAX_PAYLOAD_BYTES} bytes",
+                   "the request cannot be classified; refusing")
+    if not raw.strip():
+        raise Deny("EMPTY_INPUT", "hook received an empty payload",
+                   "check that Claude Code is piping the PreToolUse JSON on stdin")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Deny("INVALID_ENCODING", "hook payload is not valid UTF-8", "expected UTF-8 JSON") from None
+    try:
+        payload = json.loads(text)
+    except (ValueError, RecursionError):
+        raise Deny("MALFORMED_JSON", "hook payload is not valid JSON",
+                   "expected one JSON object with tool_name and tool_input") from None
+    if not isinstance(payload, dict):
+        raise Deny("INVALID_STRUCTURE", f"hook payload must be a JSON object, got {type(payload).__name__}")
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        raise Deny("INVALID_STRUCTURE", "tool_name is missing or not a non-empty string")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        raise Deny("INVALID_STRUCTURE", "tool_input is missing or not an object", f"tool_name={tool_name!r}")
+    return tool_name, tool_input
+
+
+# --------------------------------------------------------------------------
+# T0-GO marker (read-only check)
+# --------------------------------------------------------------------------
+
+
+def load_marker(scope: str = "?", min_tier: int = 1) -> dict[str, Any]:
+    path = marker_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise Deny("NO_MARKER", f"no T0-GO marker at {path} for scope '{scope}' (requires Tier {min_tier})",
+                   "a human must run hooks/issue_t0_go.py; agents must not") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Deny("MARKER_UNREADABLE", f"T0-GO marker at {path} is unreadable ({type(exc).__name__})",
+                   "treating as absent") from None
+    try:
+        marker = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise Deny("MARKER_MALFORMED", f"T0-GO marker at {path} is not valid JSON", "treating as absent") from None
+    if not isinstance(marker, dict):
+        raise Deny("MARKER_MALFORMED", "T0-GO marker must be a JSON object")
+
+    decision_id = marker.get("decision_id")
+    if not isinstance(decision_id, str) or not decision_id:
+        raise Deny("MARKER_MALFORMED", "marker decision_id must be a non-empty string")
+    scope = marker.get("scope")
+    if not isinstance(scope, list) or not all(isinstance(s, str) for s in scope):
+        raise Deny("MARKER_MALFORMED", "marker scope must be a list of strings")
+    tier = marker.get("tier", 1)
+    if isinstance(tier, bool) or not isinstance(tier, int) or tier not in (1, 2):
+        raise Deny("MARKER_MALFORMED", "marker tier must be the integer 1 or 2")
+    ttl = marker.get("ttl_seconds")
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl <= 0:
+        raise Deny("MARKER_MALFORMED", "marker ttl_seconds must be a positive integer")
+    consumed = marker.get("consumed", False)
+    if not isinstance(consumed, bool):
+        raise Deny("MARKER_MALFORMED", "marker consumed must be a boolean")
+    issued = marker.get("issued_at")
+    if not isinstance(issued, str):
+        raise Deny("MARKER_MALFORMED", "marker issued_at must be an ISO-8601 string")
+    try:
+        issued_at = datetime.fromisoformat(issued.replace("Z", "+00:00"))
+    except ValueError:
+        raise Deny("MARKER_MALFORMED", "marker issued_at is not a valid ISO-8601 timestamp") from None
+    if issued_at.tzinfo is None:
+        raise Deny("MARKER_MALFORMED", "marker issued_at must carry a timezone (use Z)")
+
+    return {
+        "decision_id": decision_id,
+        "scope": scope,
+        "tier": tier,
+        "ttl_seconds": ttl,
+        "consumed": consumed,
+        "issued_at": issued_at,
+    }
+
+
+def check_t0_go(scope: str, min_tier: int = 1, now: Optional[datetime] = None) -> dict[str, Any]:
+    """Read-only check. Does NOT consume the marker (the MCP servers do)."""
+    marker = load_marker(scope, min_tier)
+    did = marker["decision_id"]
+    if marker["consumed"]:
+        raise Deny("MARKER_CONSUMED", f"T0-GO marker for decision {did} was already consumed",
+                   "a human must issue a fresh one")
+    if scope not in marker["scope"]:
+        raise Deny("MARKER_SCOPE", f"T0-GO marker for decision {did} does not cover '{scope}'",
+                   f"covers: {marker['scope']}")
+    if marker["tier"] < min_tier:
+        raise Deny("MARKER_TIER", f"T0-GO marker for decision {did} is Tier {marker['tier']}, "
+                   f"but '{scope}' requires Tier {min_tier}", "tier is never inferred upward")
+    current = now or datetime.now(timezone.utc)
+    age = (current - marker["issued_at"]).total_seconds()
+    if age < -FUTURE_SKEW.total_seconds():
+        raise Deny("MARKER_FUTURE_DATED", f"T0-GO marker for decision {did} is dated in the future")
+    if age > marker["ttl_seconds"]:
+        raise Deny("MARKER_EXPIRED", f"T0-GO marker for decision {did} expired", "a human must issue a fresh one")
+    return marker
+
+
+# --------------------------------------------------------------------------
+# Bash
+# --------------------------------------------------------------------------
+
+
+def _touches_authorization_material(command: str) -> Optional[str]:
+    if MARKER_FILENAME_RE.search(command):
+        return "mentions the T0-GO marker file"
+    if MARKER_ENV_RE.search(command):
+        return "sets or references T0_GO_MARKER_PATH"
+    custom = os.environ.get("T0_GO_MARKER_PATH")
+    if custom and custom in command:
+        return "mentions the configured T0-GO marker path"
+    if ISSUER_EXEC_RE.search(command):
+        return "executes the T0-GO issuer (human-run only)"
     return None
 
 
-def check_t0_go(scope: str, min_tier: int = 1) -> None:
-    if not GO_MARKER_PATH.exists():
-        block(
-            f"pre_tool_guard: no T0-GO marker at {GO_MARKER_PATH} for scope "
-            f"'{scope}' (requires Tier {min_tier}). Run hooks/issue_t0_go.py "
-            f"(human-run only) first."
-        )
+def bash_write_scopes(command: str) -> set[str]:
+    if not (WRITE_KEYWORDS.search(command) or HTTP_MUTATION.search(command)):
+        return set()
+    scopes: set[str] = set()
+    for table_id in PROTECTED_TABLES:
+        if table_id in command:
+            scopes.add(table_id)
+    for ref in SUPABASE_REFS:
+        if ref in command:
+            scopes.add(f"supabase:{ref}")
+    if CANON_BASE_ID in command and not any(s in PROTECTED_TABLES for s in scopes):
+        scopes.add(CANON_BASE_ID)
+    return scopes
 
+
+def check_bash(command: Any) -> None:
+    if not isinstance(command, str):
+        raise Deny("INVALID_TOOL_INPUT", "Bash tool_input.command is missing or not a string")
+    for pattern in DESTRUCTIVE_BASH_PATTERNS:
+        if pattern.search(command):
+            raise Deny("DESTRUCTIVE_BASH", f"destructive pattern ({pattern.pattern})", f"command: {command!r}")
+    why = _touches_authorization_material(command)
+    if why:
+        raise Deny("AUTH_MATERIAL", f"command {why}",
+                   "agents must not create, edit, move or run authorization material; best-effort check")
+    for scope in sorted(bash_write_scopes(command)):
+        check_t0_go(scope, min_tier=2 if scope in TIER_2_SCOPES else 1)
+
+
+# --------------------------------------------------------------------------
+# File-write tools
+# --------------------------------------------------------------------------
+
+
+def check_file_write(tool_name: str, tool_input: dict[str, Any]) -> None:
+    targets = [tool_input[f] for f in FILE_PATH_FIELDS if f in tool_input]
+    if not targets:
+        raise Deny("INVALID_TOOL_INPUT", f"{tool_name} has no file_path/notebook_path")
+    marker = marker_path()
     try:
-        marker = json.loads(GO_MARKER_PATH.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        block(f"pre_tool_guard: T0-GO marker unreadable/malformed ({exc}) — treating as absent.")
-        return
-
-    if marker.get("consumed"):
-        block(
-            f"pre_tool_guard: T0-GO marker for decision {marker.get('decision_id')} "
-            f"was already consumed. Issue a fresh one."
-        )
-
-    scope_list = marker.get("scope", [])
-    if scope not in scope_list:
-        block(
-            f"pre_tool_guard: T0-GO marker for decision {marker.get('decision_id')} "
-            f"does not cover '{scope}' (covers: {scope_list}). Issue a marker scoped to this write."
-        )
-
-    marker_tier = marker.get("tier", 1)
-    if marker_tier < min_tier:
-        block(
-            f"pre_tool_guard: T0-GO marker for decision {marker.get('decision_id')} is "
-            f"Tier {marker_tier}, but '{scope}' requires Tier {min_tier} (governance-class "
-            f"write). Issue a Tier {min_tier} marker explicitly."
-        )
-
-    try:
-        issued_at = datetime.fromisoformat(marker["issued_at"].replace("Z", "+00:00"))
-        ttl = int(marker["ttl_seconds"])
-    except (KeyError, ValueError, TypeError) as exc:
-        block(f"pre_tool_guard: T0-GO marker has malformed issued_at/ttl_seconds ({exc}).")
-        return
-
-    now = datetime.now(timezone.utc)
-    if (now - issued_at).total_seconds() > ttl:
-        block(
-            f"pre_tool_guard: T0-GO marker for decision {marker.get('decision_id')} "
-            f"expired. Issue a fresh one."
-        )
-    # Valid — but NOT consumed here. The MCP server (or, for Bash/gh/Supabase
-    # calls this hook alone gates, a human) is responsible for treating a
-    # single marker as single-use where that matters. This hook's job is the
-    # fast pre-check, not the source of truth on reuse.
+        marker_resolved: Optional[Path] = marker.expanduser().resolve()
+    except (OSError, RuntimeError):
+        marker_resolved = None
+    for target in targets:
+        if not isinstance(target, str) or not target:
+            raise Deny("INVALID_TOOL_INPUT", f"{tool_name} path must be a non-empty string")
+        p = Path(target).expanduser()
+        try:
+            resolved: Optional[Path] = p.resolve()
+        except (OSError, RuntimeError):
+            resolved = None
+        if p.name.lower() == "t0-go.json" or (resolved and marker_resolved and resolved == marker_resolved):
+            raise Deny("AUTH_MATERIAL", f"{tool_name} targets the T0-GO marker",
+                       "agents must not write authorization material")
 
 
-def main() -> None:
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        # Malformed input from the harness itself isn't this hook's failure
-        # mode to enforce against — fail open rather than break every tool
-        # call on a parsing bug.
-        allow()
-        return
+# --------------------------------------------------------------------------
+# MCP classification
+# --------------------------------------------------------------------------
 
-    tool_name = payload.get("tool_name", "")
-    tool_input = payload.get("tool_input", {}) or {}
 
+@dataclass(frozen=True)
+class Classification:
+    kind: str  # "read_only" | "protected" | "out_of_scope"
+    scope: str = ""
+    min_tier: int = 1
+
+
+ScopeFn = Callable[[dict[str, Any]], Classification]
+
+
+@dataclass(frozen=True)
+class ProtectedRule:
+    server: "re.Pattern[str]"
+    tool: "re.Pattern[str]"
+    resolve: ScopeFn
+
+
+@dataclass(frozen=True)
+class ReadOnlyRule:
+    server: "re.Pattern[str]"
+    tools: frozenset[str]
+
+
+def _fixed(scope: str, min_tier: int = 1) -> ScopeFn:
+    return lambda _inp: Classification("protected", scope, min_tier)
+
+
+def _airtable_generic(tool_input: dict[str, Any]) -> Classification:
+    base_id = tool_input.get("baseId")
+    if not isinstance(base_id, str) or not base_id:
+        raise Deny("INVALID_TOOL_INPUT", "Airtable write has no string baseId, so its target cannot be identified",
+                   "if this server uses a different parameter name, classify it explicitly")
+    table_id = tool_input.get("tableId")
+    if table_id is not None and not isinstance(table_id, str):
+        raise Deny("INVALID_TOOL_INPUT", "Airtable write tableId must be a string")
+    if base_id == CANON_BASE_ID:
+        return Classification("protected", table_id or CANON_BASE_ID, 2 if table_id in TIER_2_SCOPES else 1)
+    # Writes to a non-Canon base are outside what this guardrail protects.
+    return Classification("out_of_scope")
+
+
+def _rx(pattern: str) -> "re.Pattern[str]":
+    return re.compile(pattern)
+
+
+# Read-only operations: EXACT tool names only. A name not listed here is not
+# read-only, however read-like it looks.
+READ_ONLY_RULES: list[ReadOnlyRule] = [
+    ReadOnlyRule(_rx(r"github"), frozenset({
+        "get_me", "get_commit", "get_file_contents", "get_check_run", "get_job_logs", "get_label",
+        "get_latest_release", "get_release_by_tag", "get_tag", "get_team_members", "get_teams",
+        "issue_read", "pull_request_read", "actions_get", "actions_list",
+        "list_branches", "list_commits", "list_issue_fields", "list_issue_types", "list_issues",
+        "list_pull_requests", "list_releases", "list_repository_collaborators", "list_tags",
+    })),
+    ReadOnlyRule(_rx(r"(?i).*supabase.*"), frozenset({
+        "list_tables", "list_migrations", "list_extensions", "list_edge_functions", "list_branches",
+        "get_edge_function", "get_logs", "get_advisors", "get_project_url",
+        "generate_typescript_types", "search_docs",
+    })),
+    # Names below are taken from this repo's README / convention and are
+    # UNVERIFIED against a live Airtable MCP server (it was unreachable when
+    # this table was written). Correct them against the real tool list.
+    ReadOnlyRule(_rx(r"Airtable"), frozenset({
+        "list_bases", "list_tables_for_base", "list_records_for_table",
+    })),
+    ReadOnlyRule(_rx(r"sfx-canon-mcp"), frozenset({
+        "canon_get_clusters", "canon_get_latest_entry", "canon_get_next_id",
+        "canon_get_session_ledger", "canon_query_entry",
+    })),
+    ReadOnlyRule(_rx(r"sfx-session-mcp"), frozenset({"session_get"})),
+    ReadOnlyRule(_rx(r"sfx-atq-mcp"), frozenset({"atq_get_item", "atq_list_open"})),
+    ReadOnlyRule(_rx(r"sfx-decisionlog-mcp"), frozenset({"decisionlog_get_latest", "decisionlog_search"})),
+    ReadOnlyRule(_rx(r"claude-code-remote"), frozenset({
+        "get_session", "list_sessions", "list_events", "get_event", "get_trigger", "list_triggers",
+        "list_environments", "get_environment", "list_repos", "list_computer_folders",
+        "read_documentation",
+    })),
+]
+
+# Protected operations: require a valid, scoped T0-GO marker. Checked BEFORE
+# the read-only table, so a name in both is protected.
+PROTECTED_RULES: list[ProtectedRule] = [
+    ProtectedRule(_rx(r"Airtable"), _rx(r"(?:create|update|delete)_.*"), _airtable_generic),
+    ProtectedRule(_rx(r"github"),
+                  _rx(r"push_files|create_or_update_file|delete_file|merge_pull_request"),
+                  _fixed("github:write")),
+    ProtectedRule(_rx(r"github"), _rx(r"create_pull_request"), _fixed("github:create_pull_request")),
+    ProtectedRule(_rx(r"(?i).*supabase.*"), _rx(r"apply_migration"), _fixed("supabase:apply_migration")),
+    ProtectedRule(_rx(r"sfx-session-mcp"), _rx(r"session_open|session_close"), _fixed("tblEZ6ctzSoTBsfCW")),
+    ProtectedRule(_rx(r"sfx-atq-mcp"), _rx(r"atq_create_task|atq_update_task"), _fixed("tblsVXX2XnhVLWMVE")),
+    ProtectedRule(_rx(r"sfx-decisionlog-mcp"), _rx(r"decisionlog_create_entry"), _fixed("tblX88U1VOwmK2fF5", 2)),
+    ProtectedRule(_rx(r"claude-code-remote"), _rx(r"create_trigger"), _fixed("claude-code-remote:create_trigger")),
+    ProtectedRule(_rx(r"claude-code-remote"), _rx(r"send_later"), _fixed("claude-code-remote:send_later")),
+]
+
+
+def classify_mcp(tool_name: str, tool_input: dict[str, Any]) -> Classification:
+    m = MCP_NAME_RE.match(tool_name)
+    if not m:
+        raise Deny("UNCLASSIFIED_MCP", f"{tool_name!r} is not a recognizable mcp__<server>__<tool> name",
+                   "denied pending classification")
+    server, tool = m.group("server"), m.group("tool")
+    for p in PROTECTED_RULES:
+        if p.server.fullmatch(server) and p.tool.fullmatch(tool):
+            return p.resolve(tool_input)
+    for r in READ_ONLY_RULES:
+        if r.server.fullmatch(server) and tool in r.tools:
+            return Classification("read_only")
+    raise Deny("UNCLASSIFIED_MCP", f"{tool_name} is not classified read-only or protected",
+               "denied pending classification: add it to READ_ONLY_RULES or PROTECTED_RULES in "
+               "hooks/pre_tool_guard.py (reviewed change)")
+
+
+# --------------------------------------------------------------------------
+# Decision + entrypoint
+# --------------------------------------------------------------------------
+
+
+def decide(tool_name: str, tool_input: dict[str, Any]) -> None:
     if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        check_bash(command)
-        allow()
+        check_bash(tool_input.get("command"))
         return
+    if tool_name in FILE_WRITE_TOOLS:
+        check_file_write(tool_name, tool_input)
+        return
+    if tool_name.startswith("mcp__"):
+        c = classify_mcp(tool_name, tool_input)
+        if c.kind == "protected":
+            check_t0_go(c.scope, min_tier=c.min_tier)
+        return
+    # Other built-in (non-MCP) tools are outside this policy.
 
-    for pattern, kind in MCP_WRITE_PATTERNS:
-        if pattern.match(tool_name):
-            scope = find_go_scope_for_mcp(tool_name, tool_input, kind)
-            if scope is not None:
-                check_t0_go(scope, min_tier=KIND_MIN_TIER.get(kind, 1))
-            allow()
-            return
 
-    allow()
+def main() -> int:
+    try:
+        raw = sys.stdin.buffer.read(MAX_PAYLOAD_BYTES + 1)
+        tool_name, tool_input = parse_payload(raw)
+        decide(tool_name, tool_input)
+        return 0
+    except Deny as d:
+        _emit(d.render())
+        return 2
+    except Exception as exc:  # noqa: BLE001 — fail closed on ANY internal error
+        _emit(f"pre_tool_guard: DENY [INTERNAL_ERROR] {type(exc).__name__}: {exc} — failing closed")
+        return 2
+
+
+def _emit(message: str) -> None:
+    try:
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 — never let a stderr failure change the exit code
+        pass
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

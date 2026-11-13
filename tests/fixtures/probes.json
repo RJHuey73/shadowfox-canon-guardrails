@@ -1,0 +1,31 @@
+{
+  "_note": "Synthetic PreToolUse payloads seeded from review probes A-K (SFX-WO-001). Nothing here is executed: the hook only reads these as data. Tests run with T0_GO_MARKER_PATH pointing at an isolated temp path; no real marker, credential or network is involved. 'no_marker' probes run with NO marker file present.",
+  "probes": [
+    {"id": "A", "desc": "malformed stdin", "raw_stdin": "not json", "expect": "deny", "code": "MALFORMED_JSON"},
+    {"id": "B", "desc": "Bash writes a marker file (no SQL keyword)", "payload": {"tool_name": "Bash", "tool_input": {"command": "echo '{\"decision_id\":\"x\",\"scope\":[\"tblEZ6ctzSoTBsfCW\"],\"tier\":2,\"ttl_seconds\":9999}' > .claude/t0-go.json"}}, "expect": "deny", "code": "AUTH_MATERIAL"},
+    {"id": "C", "desc": "Bash runs the marker issuer", "payload": {"tool_name": "Bash", "tool_input": {"command": "python3 hooks/issue_t0_go.py --decision-id X --scope tblX88U1VOwmK2fF5 --tier 2"}}, "expect": "deny", "code": "AUTH_MATERIAL"},
+    {"id": "D", "desc": "Write tool targets the marker path", "payload": {"tool_name": "Write", "tool_input": {"file_path": ".claude/t0-go.json", "content": "{}"}}, "expect": "deny", "code": "AUTH_MATERIAL"},
+    {"id": "E", "desc": "GitHub create_pull_request, no marker", "payload": {"tool_name": "mcp__github__create_pull_request", "tool_input": {}}, "expect": "deny", "code": "NO_MARKER", "scope": "github:create_pull_request"},
+    {"id": "F", "desc": "GitHub merge_pull_request, no marker", "payload": {"tool_name": "mcp__github__merge_pull_request", "tool_input": {}}, "expect": "deny", "code": "NO_MARKER", "scope": "github:write"},
+    {"id": "G", "desc": "supabase-telemetry apply_migration, no marker", "payload": {"tool_name": "mcp__supabase-telemetry__apply_migration", "tool_input": {}}, "expect": "deny", "code": "NO_MARKER", "scope": "supabase:apply_migration"},
+    {"id": "H", "desc": "Supabase apply_migration (original matcher name), no marker", "payload": {"tool_name": "mcp__Supabase__apply_migration", "tool_input": {}}, "expect": "deny", "code": "NO_MARKER", "scope": "supabase:apply_migration"},
+    {"id": "I", "desc": "Bash curl DELETE on a Canon table, no marker", "payload": {"tool_name": "Bash", "tool_input": {"command": "curl -X DELETE https://api.airtable.com/v0/appVftexD3KJRcdij/tbltw4Jy0LHWWz5DL/rec1"}}, "expect": "deny", "code": "NO_MARKER", "scope": "tbltw4Jy0LHWWz5DL"},
+    {"id": "J", "desc": "Bash curl PATCH on a Canon table (no SQL keyword), no marker", "payload": {"tool_name": "Bash", "tool_input": {"command": "curl -X PATCH https://api.airtable.com/v0/appVftexD3KJRcdij/tbltw4Jy0LHWWz5DL/rec1 -d x"}}, "expect": "deny", "code": "NO_MARKER", "scope": "tbltw4Jy0LHWWz5DL"},
+    {"id": "K", "desc": "claude-code-remote create_trigger, no marker", "payload": {"tool_name": "mcp__claude-code-remote__create_trigger", "tool_input": {}}, "expect": "deny", "code": "NO_MARKER", "scope": "claude-code-remote:create_trigger"}
+  ],
+  "read_only_allowed": [
+    {"id": "M1", "desc": "GitHub read (allowlisted)", "payload": {"tool_name": "mcp__github__get_commit", "tool_input": {"sha": "main"}}},
+    {"id": "M2", "desc": "Supabase read, different server name (allowlisted)", "payload": {"tool_name": "mcp__supabase-telemetry__list_tables", "tool_input": {}}},
+    {"id": "M3", "desc": "Decision Log read", "payload": {"tool_name": "mcp__sfx-decisionlog-mcp__decisionlog_search", "tool_input": {}}},
+    {"id": "M4", "desc": "Plain Bash with no protected surface", "payload": {"tool_name": "Bash", "tool_input": {"command": "ls -la"}}},
+    {"id": "M5", "desc": "Write to an ordinary file", "payload": {"tool_name": "Write", "tool_input": {"file_path": "notes.txt", "content": "x"}}}
+  ],
+  "unclassified_denied": [
+    {"id": "U1", "desc": "GitHub write not in either table", "payload": {"tool_name": "mcp__github__issue_write", "tool_input": {}}},
+    {"id": "U2", "desc": "Supabase execute_sql (raw SQL; never authorizable here)", "payload": {"tool_name": "mcp__supabase-telemetry__execute_sql", "tool_input": {"query": "select 1"}}},
+    {"id": "U3", "desc": "read-like name that is not allowlisted", "payload": {"tool_name": "mcp__github__list_notifications", "tool_input": {}}},
+    {"id": "U4", "desc": "unknown server", "payload": {"tool_name": "mcp__totally-new-server__do_thing", "tool_input": {}}},
+    {"id": "U5", "desc": "claude-code-remote update_trigger (not classified in this pass)", "payload": {"tool_name": "mcp__claude-code-remote__update_trigger", "tool_input": {}}},
+    {"id": "U6", "desc": "malformed mcp name", "payload": {"tool_name": "mcp__x", "tool_input": {}}}
+  ]
+}
