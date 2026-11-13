@@ -242,6 +242,9 @@ class TestMarker(HookCase):
             "issued_at int": {**good, "issued_at": 5},
             "issued_at garbage": {**good, "issued_at": "yesterday"},
             "issued_at naive": {**good, "issued_at": "2026-11-13T00:00:00"},
+            "issued_at space separator": {**good, "issued_at": iso(datetime.now(timezone.utc)).replace("T", " ")},
+            "issued_at basic offset": {**good, "issued_at": iso(datetime.now(timezone.utc))[:-1] + "+0000"},
+            "issued_at date only": {**good, "issued_at": "2026-11-13"},
             "decision_id empty": {**good, "decision_id": ""},
             "marker is a list": [good],
         }
@@ -276,6 +279,8 @@ class TestAirtable(HookCase):
              "tool_input": {"baseId": guard.CANON_BASE_ID, "tableId": DL_SCOPE}}
         self.write_marker(marker_doc([DL_SCOPE], tier=1))
         self.assertDenied(self.run_hook(p), "MARKER_TIER")
+        self.write_marker(marker_doc([DL_SCOPE], tier=2))
+        self.assertAllowed(self.run_hook(p))
 
     def test_write_without_identifiable_base_is_denied(self) -> None:
         for inp in ({}, {"baseId": 5}, {"baseId": ""}, {"base_id": guard.CANON_BASE_ID}):
@@ -283,10 +288,29 @@ class TestAirtable(HookCase):
                 p = {"tool_name": "mcp__Airtable__create_records_for_table", "tool_input": inp}
                 self.assertDenied(self.run_hook(p), "INVALID_TOOL_INPUT")
 
-    def test_non_canon_base_write_is_outside_this_guardrail(self) -> None:
+    def test_non_canon_base_write_is_denied_as_unclassified(self) -> None:
+        # Owner decision 2 (reconciliation 1c): previously allowed without a marker.
         p = {"tool_name": "mcp__Airtable__create_records_for_table",
              "tool_input": {"baseId": "appOTHERBASE00000", "tableId": "tblx"}}
-        self.assertAllowed(self.run_hook(p))
+        self.assertDenied(self.run_hook(p), "UNCLASSIFIED_MCP")
+        self.write_marker(marker_doc(["appOTHERBASE00000", "tblx"], tier=2))
+        self.assertDenied(self.run_hook(p), "UNCLASSIFIED_MCP")
+
+    def test_verified_airtable_reads_are_allowed(self) -> None:
+        for tool in ("list_bases", "list_tables_for_base", "list_records_for_table",
+                     "search_bases", "get_table_schema", "search_records"):
+            with self.subTest(tool=tool):
+                self.assertAllowed(self.run_hook({"tool_name": f"mcp__Airtable__{tool}",
+                                                  "tool_input": {"baseId": guard.CANON_BASE_ID}}))
+
+    def test_other_airtable_tools_stay_unclassified(self) -> None:
+        self.write_marker(marker_doc([guard.CANON_BASE_ID, "tblEZ6ctzSoTBsfCW"], tier=2))
+        for tool in ("list_views_for_table", "ping", "list_record_comments", "submit_form",
+                     "revert_action", "publish_form", "test_automation_webhook_trigger"):
+            with self.subTest(tool=tool):
+                self.assertDenied(self.run_hook({"tool_name": f"mcp__Airtable__{tool}",
+                                                 "tool_input": {"baseId": guard.CANON_BASE_ID}}),
+                                  "UNCLASSIFIED_MCP")
 
 
 # --------------------------------------------------------------------------

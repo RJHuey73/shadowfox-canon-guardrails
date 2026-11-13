@@ -22,7 +22,7 @@ const markerPath = join(dir, "t0-go.json");
 const fetchLog = join(dir, "fetch.jsonl");
 const clients = {};
 
-async function connect(server) {
+async function connect(server, extraEnv = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--import", join(REPO, "tests", "js", "fetch-mock.mjs"), join(REPO, "mcp", `${server}.js`)],
@@ -31,6 +31,7 @@ async function connect(server) {
       AIRTABLE_API_KEY: "test-key-not-real",
       T0_GO_MARKER_PATH: markerPath,
       FETCH_LOG: fetchLog,
+      ...extraEnv,
     },
     stderr: "ignore",
   });
@@ -186,4 +187,24 @@ test("decisionlog_search escapes backslashes so a query cannot close the formula
   const found = [...formula.matchAll(literal)];
   assert.equal(found.length, 3, formula);
   assert.equal(formula.replace(literal, "").replace(/\s/g, ""), "OR(,,)", formula);
+});
+
+test("a failed Airtable write burns the marker: one request, no retry, replay denied", async () => {
+  // Consumption happens before the network write (documented trade-off in
+  // docs/THREAT-MODEL.md): a write that fails still uses up its marker.
+  const failing = await connect("sfx-session-mcp", { FETCH_MOCK_STATUS: "500" });
+  try {
+    reset({ marker: validMarker([SESSION]) });
+    const args = { session_id: "SFX-SESSION-TEST", canon_version_start: "v0.0.0-test", objectives: "test" };
+    const first = await failing.callTool({ name: "session_open", arguments: args });
+    assert.equal(first.isError, true);
+    assert.equal(requests().length, 1, "exactly one request, no automatic retry");
+    assert.equal(JSON.parse(readFileSync(markerPath, "utf-8")).consumed, true, "marker is consumed");
+    assert.equal(existsSync(`${markerPath}.lock`), false, "lock file must be released");
+    const again = await failing.callTool({ name: "session_open", arguments: args });
+    assert.equal(again.isError, true);
+    assert.equal(requests().length, 1, "replay of the burned marker sends nothing");
+  } finally {
+    await failing.close();
+  }
 });

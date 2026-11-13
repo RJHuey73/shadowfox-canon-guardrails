@@ -18,7 +18,10 @@
     {"id": "M2", "desc": "Supabase read, different server name (allowlisted)", "payload": {"tool_name": "mcp__supabase-telemetry__list_tables", "tool_input": {}}},
     {"id": "M3", "desc": "Decision Log read", "payload": {"tool_name": "mcp__sfx-decisionlog-mcp__decisionlog_search", "tool_input": {}}},
     {"id": "M4", "desc": "Plain Bash with no protected surface", "payload": {"tool_name": "Bash", "tool_input": {"command": "ls -la"}}},
-    {"id": "M5", "desc": "Write to an ordinary file", "payload": {"tool_name": "Write", "tool_input": {"file_path": "notes.txt", "content": "x"}}}
+    {"id": "M5", "desc": "Write to an ordinary file", "payload": {"tool_name": "Write", "tool_input": {"file_path": "notes.txt", "content": "x"}}},
+    {"id": "M6", "desc": "Airtable search_bases (allowlisted, owner decision 5)", "payload": {"tool_name": "mcp__Airtable__search_bases", "tool_input": {"searchQuery": "canon"}}},
+    {"id": "M7", "desc": "Airtable get_table_schema (allowlisted, owner decision 5)", "payload": {"tool_name": "mcp__Airtable__get_table_schema", "tool_input": {"baseId": "appVftexD3KJRcdij", "tables": [{"tableId": "tblEZ6ctzSoTBsfCW"}]}}},
+    {"id": "M8", "desc": "Airtable search_records (allowlisted, owner decision 5)", "payload": {"tool_name": "mcp__Airtable__search_records", "tool_input": {"baseId": "appVftexD3KJRcdij", "table": "tblEZ6ctzSoTBsfCW", "query": "x", "fields": "ALL_SEARCHABLE_FIELDS"}}}
   ],
   "unclassified_denied": [
     {"id": "U1", "desc": "GitHub write not in either table", "payload": {"tool_name": "mcp__github__issue_write", "tool_input": {}}},
@@ -26,6 +29,8 @@
     {"id": "U3", "desc": "read-like name that is not allowlisted", "payload": {"tool_name": "mcp__github__list_notifications", "tool_input": {}}},
     {"id": "U4", "desc": "unknown server", "payload": {"tool_name": "mcp__totally-new-server__do_thing", "tool_input": {}}},
     {"id": "U5", "desc": "claude-code-remote update_trigger (not classified in this pass)", "payload": {"tool_name": "mcp__claude-code-remote__update_trigger", "tool_input": {}}},
-    {"id": "U6", "desc": "malformed mcp name", "payload": {"tool_name": "mcp__x", "tool_input": {}}}
+    {"id": "U6", "desc": "malformed mcp name", "payload": {"tool_name": "mcp__x", "tool_input": {}}},
+    {"id": "U7", "desc": "Airtable read not allowlisted (list_views_for_table)", "payload": {"tool_name": "mcp__Airtable__list_views_for_table", "tool_input": {"baseId": "appVftexD3KJRcdij"}}},
+    {"id": "U8", "desc": "Airtable write to a non-Canon base (owner decision 2)", "payload": {"tool_name": "mcp__Airtable__create_records_for_table", "tool_input": {"baseId": "appZfrNIUEip5MazD", "tableId": "tblGlReoTNWfYnXIG"}}}
   ]
 }

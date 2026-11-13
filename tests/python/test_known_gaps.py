@@ -8,15 +8,20 @@ When a gap is closed, delete its test here and add an acceptance test in
 test_pre_tool_guard.py / test_harness_failures.py that asserts the new,
 safe behaviour.
 
+Reconciliation 1c (2026-11-13): the direct T10 forms, the listed T11 tools,
+the T11 HTTP-verb case and T12 were closed by the reconciled hook and moved
+to test_pre_tool_guard.py as acceptance tests. What remains pinned here is
+still open. The proposed design for closing the Canon-route gaps is
+ADR-0001 (PR #3, Proposed, not ratified).
+
 Run separately: python -m pytest tests/python -m known_gap
 """
 
 import json
-import re
 
 import pytest
 
-from conftest import REPO, valid_marker
+from conftest import valid_marker
 
 pytestmark = pytest.mark.known_gap
 
@@ -44,57 +49,37 @@ def test_gap_t9_hook_only_paths_never_consume_the_marker(run_hook, marker_path, 
     assert marker_path.read_text() == before
 
 
-# --- T10: the agent session can create its own marker -----------------------
-# The hook only sees tools its matchers route to it, and treats these Bash
-# commands as harmless. Nothing here is executed: the hook only inspects the
-# command string.
+# --- T10 (remaining): obfuscated marker writes ------------------------------
+# The reconciled hook denies direct references to the marker file and the
+# issuer, but its checks are string matches. Shell obfuscation defeats them,
+# and an agent with file-system access can always write the file by a route
+# the hook does not see. Nothing here is executed.
 
 @pytest.mark.parametrize(
     "command",
     [
-        "echo '{}' > .claude/t0-go.json",
-        "python3 hooks/issue_t0_go.py --decision-id X --scope tblEZ6ctzSoTBsfCW",
-        "cp /tmp/m.json .claude/t0-go.json",
+        "echo '{}' > .claude/t0-g*.json",
+        "python3 -c \"open('.claude/t0-'+'go.json','w').write('{}')\"",
     ],
 )
-def test_gap_t10_bash_can_write_the_marker_or_run_the_issuer(run_hook, command):
+def test_gap_t10_obfuscated_marker_writes_are_not_detected(run_hook, command):
     assert run_hook(bash(command)).returncode == ALLOW
 
 
-@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
-def test_gap_t10_file_tools_are_never_routed_to_the_hook(tool):
-    settings = json.loads((REPO / "config" / "settings.json.example").read_text())
-    matchers = [re.compile(f"^(?:{e['matcher']})$") for e in settings["hooks"]["PreToolUse"]]
-    assert not any(m.match(tool) for m in matchers)
+# --- T11 (remaining): write routes the hook cannot attribute ------------------
 
-
-# --- T11: write-capable surfaces outside the matchers -------------------------
-
-UNGATED_WRITE_CAPABLE = [
-    mcp("mcp__Airtable__submit_form", baseId=CANON_BASE, pageId="pagXXXXXXXXXXXXXX"),
-    mcp("mcp__Airtable__revert_action", baseId=CANON_BASE, actionId="actXXXXXXXXXXXXXX"),
-    mcp("mcp__plugin_airtable_airtable__create_records_for_table", baseId=CANON_BASE, tableId=SESSION),
-    mcp("mcp__Supabase__execute_sql", query="DROP TABLE x"),
-    mcp("mcp__github__create_branch"),
-    mcp("mcp__github__enable_pr_auto_merge"),
-]
-
-
-@pytest.mark.parametrize("payload", UNGATED_WRITE_CAPABLE, ids=[p["tool_name"] for p in UNGATED_WRITE_CAPABLE])
-def test_gap_t11_write_capable_tools_outside_the_matchers(run_hook, payload):
-    assert run_hook(payload).returncode == ALLOW
-
-
-def test_gap_t11_http_verbs_are_not_write_keywords(run_hook):
-    cmd = f"curl -X PATCH https://api.airtable.com/v0/{CANON_BASE}/{SESSION}/recXXXXXXXXXXXXXX"
-    assert run_hook(bash(cmd)).returncode == ALLOW
-
-
-# --- T12: undecodable or empty hook input fails open --------------------------
-
-@pytest.mark.parametrize("stdin", ["", "{not json", "[]"])
-def test_gap_t12_unparseable_or_non_object_input_is_allowed(run_hook, stdin):
-    assert run_hook(None, raw_stdin=stdin).returncode == ALLOW
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Canon table hidden behind a shell variable: no protected identifier
+        # appears in the command string.
+        'curl -X PATCH "$CANON_URL" -d \'{"fields":{}}\'',
+        # GitHub writes through the gh CLI are not classified at all.
+        "gh api -X POST repos/RJHuey73/shadowfox-canon-guardrails/pulls -f title=x",
+    ],
+)
+def test_gap_t11_bash_write_routes_without_a_named_protected_surface(run_hook, command):
+    assert run_hook(bash(command)).returncode == ALLOW
 
 
 # --- TTL has no upper bound ---------------------------------------------------

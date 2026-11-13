@@ -154,9 +154,15 @@ def test_generic_airtable_write_to_decision_log_needs_tier_2(run_hook, marker_pa
     assert run_hook(payload).returncode == ALLOW
 
 
-def test_generic_airtable_write_to_another_base_is_not_this_hooks_concern(run_hook):
+def test_generic_airtable_write_to_another_base_is_denied_as_unclassified(run_hook, marker_path):
+    # Owner decision 2 (reconciliation 1c). PR #2 asserted ALLOW here ("not
+    # this hook's concern"); non-Canon Airtable writes are now denied, even
+    # with a marker naming that base.
     payload = mcp("mcp__Airtable__create_records_for_table", baseId="appZfrNIUEip5MazD", tableId=SESSION)
-    assert run_hook(payload).returncode == ALLOW
+    assert run_hook(payload).returncode == BLOCK
+    write_marker(marker_path, valid_marker(["appZfrNIUEip5MazD", SESSION], tier=2))
+    proc = run_hook(payload)
+    assert proc.returncode == BLOCK and "UNCLASSIFIED_MCP" in proc.stderr
 
 
 # --- missing or malformed target identifiers ---------------------------------
@@ -185,32 +191,96 @@ def test_canon_base_without_table_is_gated_on_the_base(run_hook, marker_path):
     assert run_hook(payload).returncode == ALLOW
 
 
-def test_absent_base_id_is_not_gated(run_hook):
-    # e.g. create_base takes workspaceId, not baseId. Unchanged behaviour.
-    assert run_hook(mcp("mcp__Airtable__create_base", workspaceId="wspZfrNIUEip5MazD")).returncode == ALLOW
+def test_absent_base_id_blocks(run_hook):
+    # e.g. create_base takes workspaceId, not baseId. PR #2 asserted ALLOW;
+    # under owner decision 2 a write whose base cannot be identified as the
+    # Canon base is denied.
+    proc = run_hook(mcp("mcp__Airtable__create_base", workspaceId="wspZfrNIUEip5MazD"))
+    assert proc.returncode == BLOCK and "Traceback" not in proc.stderr
 
 
 # --- configuration consistency -------------------------------------------
 
-def test_settings_matchers_route_exactly_the_hooks_write_patterns(guard):
-    """config/settings.json.example decides which tool calls reach the hook
-    at all; MCP_WRITE_PATTERNS decides which of those it gates. They must
-    agree, or a pattern is dead code (hook never invoked) or a matcher sends
-    calls the hook silently allows."""
+# Rewritten for the reconciled hook: PR #2 compared the settings matchers
+# with MCP_WRITE_PATTERNS (a name list). The reconciled hook has no such
+# list; it denies every MCP call it cannot classify, which only works if
+# every MCP call reaches it. So the invariant is now "routing is total".
+
+def test_settings_route_every_mcp_bash_and_file_write_call_to_the_hook():
     settings = json.loads((REPO / "config" / "settings.json.example").read_text())
     matchers = [re.compile(f"^(?:{e['matcher']})$") for e in settings["hooks"]["PreToolUse"]]
     names = [p["tool_name"] for p, _, _ in GATED_TOOLS] + [
         "mcp__github__create_or_update_file", "mcp__github__delete_file", "mcp__Airtable__update_field",
         "mcp__Airtable__list_records_for_table", "mcp__sfx-session-mcp__session_get", "Bash", "Write", "Edit",
-        "mcp__Airtable__submit_form", "mcp__Supabase__execute_sql", "mcp__github__create_branch",
+        "MultiEdit", "NotebookEdit", "mcp__Airtable__submit_form", "mcp__Supabase__execute_sql",
+        "mcp__github__create_branch", "mcp__plugin_airtable_airtable__create_records_for_table",
+        "mcp__some-future-server__any_tool",
     ]
     for name in names:
-        routed = any(m.match(name) for m in matchers)
-        gated = name == "Bash" or any(p.match(name) for p, _ in guard.MCP_WRITE_PATTERNS)
-        assert routed == gated, name
+        assert any(m.match(name) for m in matchers), name
 
 
-def test_mcp_config_server_names_match_hook_tool_prefixes(guard):
-    servers = json.loads((REPO / "config" / "mcp.json.example").read_text())["mcpServers"]
-    prefixes = {p.pattern.split("__")[1] for p, kind in guard.MCP_WRITE_PATTERNS if kind.startswith("sfx_")}
-    assert prefixes == {s for s in servers if s != "sfx-canon-mcp"}
+def test_mcp_config_server_names_match_hook_rules(guard):
+    servers = set(json.loads((REPO / "config" / "mcp.json.example").read_text())["mcpServers"])
+    with_protected = {s for s in servers if any(r.server.fullmatch(s) for r in guard.PROTECTED_RULES)}
+    with_reads = {s for s in servers if any(r.server.fullmatch(s) for r in guard.READ_ONLY_RULES)}
+    assert with_protected == servers - {"sfx-canon-mcp"}  # sfx-canon-mcp has no write tool
+    assert with_reads == servers  # every configured server has its read tools classified
+
+
+# --- known gaps from PR #2 that the reconciled hook closes --------------------
+# These were pinned as ALLOW in test_known_gaps.py. The same payloads are now
+# acceptance tests asserting BLOCK. Gaps that remain open are still pinned
+# there.
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo '{}' > .claude/t0-go.json",
+        "python3 hooks/issue_t0_go.py --decision-id X --scope tblEZ6ctzSoTBsfCW",
+        "cp /tmp/m.json .claude/t0-go.json",
+    ],
+)
+def test_closed_t10_direct_marker_writes_and_issuer_runs_block(run_hook, command):
+    proc = run_hook(bash(command))
+    assert proc.returncode == BLOCK and "AUTH_MATERIAL" in proc.stderr
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+def test_closed_t10_file_tools_are_routed_and_marker_writes_block(run_hook, tool):
+    settings = json.loads((REPO / "config" / "settings.json.example").read_text())
+    matchers = [re.compile(f"^(?:{e['matcher']})$") for e in settings["hooks"]["PreToolUse"]]
+    assert any(m.match(tool) for m in matchers)
+    field = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    assert run_hook({"tool_name": tool, "tool_input": {field: ".claude/t0-go.json"}}).returncode == BLOCK
+
+
+CLOSED_T11 = [
+    mcp("mcp__Airtable__submit_form", baseId=CANON_BASE, pageId="pagXXXXXXXXXXXXXX"),
+    mcp("mcp__Airtable__revert_action", baseId=CANON_BASE, actionId="actXXXXXXXXXXXXXX"),
+    mcp("mcp__plugin_airtable_airtable__create_records_for_table", baseId=CANON_BASE, tableId=SESSION),
+    mcp("mcp__Supabase__execute_sql", query="DROP TABLE x"),
+    mcp("mcp__github__create_branch"),
+    mcp("mcp__github__enable_pr_auto_merge"),
+]
+
+
+@pytest.mark.parametrize("payload", CLOSED_T11, ids=[p["tool_name"] for p in CLOSED_T11])
+def test_closed_t11_unclassified_write_capable_tools_block_even_with_a_marker(run_hook, marker_path, payload):
+    write_marker(marker_path, valid_marker([SESSION, CANON_BASE, "github:write", "supabase:apply_migration"], tier=2))
+    proc = run_hook(payload)
+    assert proc.returncode == BLOCK and "UNCLASSIFIED_MCP" in proc.stderr
+
+
+def test_closed_t11_http_patch_to_a_canon_table_needs_a_marker(run_hook, marker_path):
+    cmd = f"curl -X PATCH https://api.airtable.com/v0/{CANON_BASE}/{SESSION}/recXXXXXXXXXXXXXX"
+    assert run_hook(bash(cmd)).returncode == BLOCK
+    write_marker(marker_path, valid_marker([SESSION]))
+    assert run_hook(bash(cmd)).returncode == ALLOW
+
+
+@pytest.mark.parametrize("stdin", ["", "{not json", "[]"])
+def test_closed_t12_unparseable_or_non_object_input_blocks(run_hook, stdin):
+    # Owner decision 1: malformed input denies with exit 2.
+    proc = run_hook(None, raw_stdin=stdin)
+    assert proc.returncode == BLOCK and "Traceback" not in proc.stderr

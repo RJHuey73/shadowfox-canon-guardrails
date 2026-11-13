@@ -10,8 +10,13 @@ from conftest import FIXTURES, marker_text
 
 
 def _outcome(guard, scope, min_tier):
+    # The reconciled hook's check_t0_go raises guard.Deny, which main() turns
+    # into exit 2 (asserted end to end in test_harness_failures.py and the
+    # unittest suite). Any other exception is still reported as a crash.
     try:
         guard.check_t0_go(scope, min_tier=min_tier)
+    except guard.Deny:
+        return "deny"
     except SystemExit as exc:
         return "deny" if exc.code == 2 else f"exit {exc.code}"
     except Exception as exc:  # a crash exits 1 at runtime: Claude Code allows the call

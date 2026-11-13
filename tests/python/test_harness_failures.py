@@ -31,6 +31,9 @@ def run_shell(command, stdin, env_extra, cwd=REPO):
     # Claude Code runs a hook's "command" through a shell. python3 may not be
     # first on PATH in a test venv, so point it at this interpreter.
     command = command.replace("python3 ", f"{sys.executable} ", 1)
+    # The settings example uses an absolute placeholder path; resolve it to
+    # this checkout, as a consumer would when installing it.
+    command = command.replace("/ABSOLUTE/PATH/TO/shadowfox-canon-guardrails", str(REPO))
     return subprocess.run(command, shell=True, input=stdin, capture_output=True, cwd=cwd, env=env, timeout=30)
 
 
@@ -94,7 +97,7 @@ def test_valid_marker_through_the_configured_command_allows_and_does_not_consume
     marker = tmp_path / "t0-go.json"
     marker.write_text(json.dumps(valid_marker([SESSION])))
     before = marker.read_text()
-    command = settings_commands()["mcp__sfx-session-mcp__(session_open|session_close)"]
+    command = settings_commands()["mcp__.*"]
     proc = run_shell(command, json.dumps(GATED).encode(), {"T0_GO_MARKER_PATH": str(marker)})
     assert proc.returncode == 0, proc.stderr
     assert marker.read_text() == before  # the MCP server, not the hook, consumes

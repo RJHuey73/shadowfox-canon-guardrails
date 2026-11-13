@@ -7,6 +7,9 @@ import { appendFileSync } from "node:fs";
 
 const LOG = process.env.FETCH_LOG;
 if (!LOG) throw new Error("fetch-mock: FETCH_LOG must be set");
+// Optional: answer every Airtable call with this HTTP status (e.g. 500) to
+// exercise failure handling. Default 200.
+const STATUS = Number(process.env.FETCH_MOCK_STATUS || 200);
 
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(String(url));
@@ -23,5 +26,10 @@ globalThis.fetch = async (url, init = {}) => {
   const body = entry.method === "GET" && !/\/rec[A-Za-z0-9]{14}$/.test(u.pathname)
     ? { records: [] }
     : { id: "recMOCKMOCKMOCK01", fields: {} };
+  if (STATUS !== 200) {
+    return new Response(JSON.stringify({ error: { type: "MOCK_FAILURE" } }), {
+      status: STATUS, headers: { "Content-Type": "application/json" },
+    });
+  }
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 };

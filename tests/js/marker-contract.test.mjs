@@ -32,6 +32,21 @@ for (const c of FIXTURES.cases) {
 test("missing marker denies", async () => {
   rmSync(markerPath, { force: true });
   assert.equal(await outcome("tblEZ6ctzSoTBsfCW", 1), "deny");
+  assert.equal(existsSync(`${markerPath}.lock`), false, "lock file must be released");
+});
+
+test("a stale lock left by a crashed server blocks the write and is not removed", async () => {
+  const text = JSON.stringify(validMarker(["tblEZ6ctzSoTBsfCW"]));
+  writeFileSync(markerPath, text);
+  writeFileSync(`${markerPath}.lock`, "");
+  try {
+    assert.equal(await outcome("tblEZ6ctzSoTBsfCW", 1), "deny");
+    assert.equal(readFileSync(markerPath, "utf-8"), text, "marker must not be consumed");
+    assert.equal(existsSync(`${markerPath}.lock`), true, "a refused caller must not delete another's lock");
+  } finally {
+    rmSync(`${markerPath}.lock`, { force: true });
+  }
+  assert.equal(await outcome("tblEZ6ctzSoTBsfCW", 1), "allow", "after a human removes the lock");
 });
 
 test("a successful check consumes the marker; the second check is denied", async () => {
@@ -46,6 +61,7 @@ test("a denied check leaves the marker untouched", async () => {
   writeFileSync(markerPath, text);
   assert.equal(await outcome("tblEZ6ctzSoTBsfCW", 1), "deny");
   assert.equal(readFileSync(markerPath, "utf-8"), text);
+  assert.equal(existsSync(`${markerPath}.lock`), false, "lock file must be released after a denial");
 });
 
 test("concurrent checks in one process consume a marker exactly once", async () => {
