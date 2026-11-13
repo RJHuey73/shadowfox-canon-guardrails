@@ -1,8 +1,10 @@
 # Threat model: shadowfox-canon-guardrails
 
 Status: **T2 analysis, `ratified: false`.** Written against starting commit
-`26138f888c29086c557451d13034c46e5d8ee003`. It describes what this code
-defends against. It is not a statement of Canon policy.
+`26138f888c29086c557451d13034c46e5d8ee003` (PR #2), then updated for the
+local reconciliation of PR #2 with Envelope A (option 1c, 2026-11-13). It
+describes what this code defends against. It is not a statement of Canon
+policy.
 
 ## Assets
 
@@ -23,10 +25,14 @@ defends against. It is not a statement of Canon policy.
 
 ## Enforcement points
 
-1. `hooks/pre_tool_guard.py` (PreToolUse). A read-only marker check for Bash
-   and write-shaped MCP tool names. Exit 2 blocks. **Exit 0 or any other
-   exit code lets the call through**: Claude Code treats non-2 exit codes as
-   non-blocking errors. So a crash in this hook *is* a fail-open.
+1. `hooks/pre_tool_guard.py` (PreToolUse). Classifies every MCP call as
+   read-only (allowed), protected (needs a valid marker; checked, never
+   consumed) or unclassified (denied), and checks Bash and file-write calls.
+   Exit 2 blocks. **Exit 0 or any other exit code lets the call through**:
+   Claude Code treats non-2 exit codes as non-blocking errors, so the hook
+   turns malformed input and every internal error into exit 2. It still
+   cannot help when the harness does not run it (no hook configured, a
+   timeout, a permission-bypass mode).
 2. `mcp/lib/airtable-client.js` `requireT0Go()`. The authoritative, consuming
    check inside the four MCP servers. Consumption makes a marker single-use.
 3. Code shape. The table ID is a module constant in each server, never tool
@@ -34,7 +40,7 @@ defends against. It is not a statement of Canon policy.
 
 ## Threats and what this PR does about each
 
-| # | Threat | Before | This PR |
+| # | Threat | Before | Status after reconciliation 1c |
 |---|---|---|---|
 | T1 | A malformed marker or payload crashes the hook (exit 1), so the call is allowed | **Observed**: top-level JSON list, string `tier`, naive or date-only `issued_at`, non-dict `tool_input`, non-string `command` all crash | All of these block (exit 2). Covered by tests. |
 | T2 | Python and JS readers disagree on what a valid marker is, so the hook says allow and the server says deny, or the reverse | **Observed**: 21 of 41 shared fixtures wrong in at least one reader; 18 are Python/JS disagreements | One strict contract, enforced identically. Both implementations run the same fixture file. |
@@ -45,9 +51,10 @@ defends against. It is not a statement of Canon policy.
 | T7 | A Canon-base Airtable call with a malformed `baseId`/`tableId` (non-string) crashes or skips the hook | **Observed** (crash = fail-open) | Blocks. |
 | T8 | Formula injection in `decisionlog_search` via `\"` | **Observed**: backslash not escaped | Backslash escaped first. Read-only impact only. |
 | T9 | Replay on hook-only write paths (GitHub, Supabase, generic Airtable MCP, Bash): the hook never consumes, so one marker allows unlimited calls within its TTL | **Observed**, and by design (documented) | **Not changed — authorization-model decision, flagged for T0.** Test pins current behaviour. |
-| T10 | The agent mints its own marker: Write/Edit tool or `echo >` to the marker path, or runs `issue_t0_go.py` via Bash | **Observed**: nothing guards the marker path or the issuer (`test_known_gaps.py::test_gap_t10_*`) | **Not changed — flagged for T0.** This is the main unresolved trust assumption. |
-| T11 | Write-capable tools outside the matcher set: `mcp__Airtable__submit_form`, `revert_action`, plugin-namespaced Airtable tools (`mcp__plugin_airtable_airtable__*`), `mcp__Supabase__execute_sql` and other Supabase mutators, GitHub `create_branch`/`enable_pr_auto_merge`/…, Bash `curl -X PATCH` to the Airtable API | **Observed** (tool names from this environment's live tool list) | **Not changed — expanding coverage is policy, flagged.** Tests pin current behaviour. |
-| T12 | Undecodable stdin to the hook is allowed | Documented design choice | Kept, flagged. A non-object JSON payload now takes the same documented path explicitly instead of crashing. |
+| T10 | The agent mints its own marker: Write/Edit tool or `echo >` to the marker path, or runs `issue_t0_go.py` via Bash | **Observed**: nothing guarded the marker path or the issuer | **Partly mitigated, still open.** The hook denies direct references to the marker file, `T0_GO_MARKER_PATH` and execution of the issuer, and file-write tools targeting the marker (acceptance tests). These are string checks: obfuscated forms pass (`test_known_gaps.py::test_gap_t10_*`), and any route the hook does not see is uncovered. This remains the main unresolved trust assumption; ADR-0001 (PR #3) proposes moving authority out of the agent's reach. |
+| T11 | Write-capable tools outside the matcher set: `mcp__Airtable__submit_form`, `revert_action`, plugin-namespaced Airtable tools (`mcp__plugin_airtable_airtable__*`), `mcp__Supabase__execute_sql` and other Supabase mutators, GitHub `create_branch`/`enable_pr_auto_merge`/…, Bash `curl -X PATCH` to the Airtable API | **Observed** (tool names from this environment's live tool list) | **Closed for MCP tools, open for Bash.** Every unclassified MCP tool is denied (owner policy), so the listed tools block even with a marker; a mutating HTTP call naming a Canon table or base needs a marker. Still open and pinned: Bash routes that name no protected surface (a URL in a variable, the `gh` CLI), and anything that holds a write credential outside the hook. |
+| T12 | Undecodable stdin to the hook is allowed | Documented design choice | **Closed (owner decision).** Empty, non-UTF-8, non-JSON and non-object input deny with exit 2 and a coded diagnostic. |
+| T13 | An Airtable write to a non-Canon base passes the hook without a marker | **Observed** ("not this hook's concern") | **Closed (owner decision).** Denied as unclassified, even with a marker naming that base. A write whose base cannot be identified (e.g. `create_base`) is denied as invalid input. |
 
 ## What a marker does and does not prove
 
@@ -63,8 +70,9 @@ separately as an ADR and is not part of this change. Tests that pin these gaps a
 
 ## Trust assumptions that remain
 
-- The agent cannot write the marker file or run the issuer (T10). Nothing in
-  this repo enforces this.
+- The agent cannot write the marker file or run the issuer (T10). The hook
+  denies the direct forms on a best-effort basis; nothing in this repo
+  enforces it against obfuscation or routes the hook does not see.
 - `decision_id` is free text and is not checked against the Decision Log.
 - `ttl_seconds` has no upper bound.
 - The marker is consumed before the Airtable request runs. A failed write

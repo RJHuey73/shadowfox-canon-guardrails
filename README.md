@@ -38,8 +38,8 @@ scaffold contained.
 | `mcp/sfx-decisionlog-mcp.js` | Write-scoped to T0 Decision Log (`tblX88U1VOwmK2fF5`) only. New — closes gap #1. |
 | `mcp/lib/airtable-client.js` | Shared HTTP + T0-GO-check helper. Table/base IDs are always passed in by the *caller's* hardcoded constants, never taken from tool input — this is what keeps the shared code from becoming a "write to any table" backdoor. |
 | `hooks/pre_tool_guard.py` | `PreToolUse` hook. Denies (exit 2) malformed input and any internal error; classifies MCP operations as read-only (allowed), protected (need a scoped T0-GO marker) or unclassified (denied); best-effort Bash and file-write checks. See "Operation policy" below. This is local input/policy hardening, **not** closure of G1. |
-| `hooks/issue_t0_go.py` | Human-run CLI that mints a single-use, TTL-scoped GO marker. **Never invoke this from an agent session** — it exists specifically so the marker can only originate from a human at a keyboard. |
-| `config/settings.json.example` | Example `.claude/settings.json` wiring showing the hook matchers, including the non-Bash MCP tool names. |
+| `hooks/issue_t0_go.py` | CLI that mints a single-use, TTL-scoped GO marker. Intended to be human-run only; **nothing enforces that** (see `docs/THREAT-MODEL.md`, T10). Never invoke it from an agent session. |
+| `config/settings.json.example` | Example `.claude/settings.json` wiring: routes Bash, the file-write tools and every `mcp__*` tool to the hook through an absolute path. Example only; nothing here installs it. |
 
 ## The T0-GO marker — closes gap #2 (no in-path enforcement)
 
@@ -59,7 +59,9 @@ bypassable checkbox, the exact weakness this was built to close.
 `issue_t0_go.py` is the only *intended* writer of that file, and it is meant
 to be human-run. **Nothing enforces that.** The marker is an unsigned file in
 the session's working directory: an agent session that can write files or run
-Bash can create one or run the issuer itself (pinned in
+Bash can create one or run the issuer itself. The hook now denies the direct
+forms (references to the marker file or the issuer), but those are string
+checks: obfuscated forms still get through (pinned in
 `tests/python/test_known_gaps.py`). A marker is therefore evidence that
 *someone* wrote it, not proof that a human authorized the write; see
 `docs/THREAT-MODEL.md` (T10).
@@ -100,14 +102,19 @@ open trust assumptions.
 ## Tests
 
 Offline: Airtable is answered by `tests/js/fetch-mock.mjs`, markers live in
-temp directories, and no credential is needed.
+temp directories, and no credential is needed. CI (`.github/workflows/tests.yml`)
+runs all of these.
 
 ```bash
-npm ci && npm test                  # node:test — marker contract + MCP tool handlers over stdio
+npm ci && npm test                          # node:test — marker contract, atomic consumption, MCP tool handlers over stdio
+python3 -m unittest discover -s tests -v    # hook policy (stdlib only; 2 expected failures = known bypasses)
 pip install pytest
-python3 -m pytest -q -m "not known_gap"   # security acceptance: hook, harness boundary, marker contract
-python3 -m pytest -q -m known_gap         # KNOWN GAPS: pins unfixed behaviour, not acceptance
+python3 -m pytest -q -m "not known_gap"     # security acceptance: hook, harness boundary, marker contract
+python3 -m pytest -q -m known_gap           # KNOWN GAPS: pins unfixed behaviour, not acceptance
 ```
+
+Payloads in `tests/fixtures/probes.json` are synthetic strings the hook reads
+as data; nothing in them is executed.
 
 ## Field IDs, not names
 
@@ -129,9 +136,10 @@ Wire hooks into a consuming repo's `.claude/settings.json` — see
 
 ## Operation policy (local hook hardening, 2026-11-13)
 
-Adopted under an owner-approved local scope (Envelope A). Status: implemented
-and unit-tested locally; **not installed anywhere, not live-tested, not a G1
-closure**.
+Adopted under an owner-approved local scope (Envelope A), then reconciled with
+PR #2 (option 1c). Status: implemented and tested offline; **not installed
+anywhere, not live-tested, not a G1 closure**. The proposed replacement
+boundary for Canon writes is ADR-0001 (PR #3, Proposed, not ratified).
 
 | Input | Result |
 |---|---|
@@ -140,6 +148,8 @@ closure**.
 | MCP tool in `READ_ONLY_RULES` (exact names) | Allow |
 | MCP tool in `PROTECTED_RULES` | Allow only with a valid, in-scope, in-tier, unexpired, unconsumed marker; otherwise deny |
 | Any other `mcp__*` tool | **Deny** (`UNCLASSIFIED_MCP`) until someone classifies it in the hook (reviewed change) |
+| Airtable `create_*` / `update_*` / `delete_*` on a base other than the Canon base | **Deny** (`UNCLASSIFIED_MCP`), even with a marker (owner decision, reconciliation 1c) |
+| Airtable write with no string `baseId` (e.g. `create_base`) | **Deny** (`INVALID_TOOL_INPUT`) |
 | Bash | Destructive patterns, mutating calls naming a Canon table/base or Supabase ref, and any reference to the marker file, `T0_GO_MARKER_PATH`, or execution of the issuer → deny / marker required |
 | Write, Edit, MultiEdit, NotebookEdit | Deny when the target is the marker (including via symlink or the configured marker path) |
 | Other built-in tools (Read, Glob, WebFetch, ...) | Outside this policy; allowed |
@@ -155,10 +165,13 @@ Supabase mutations, `claude-code-remote` `update_trigger` / `delete_trigger` /
 `fire_trigger`, GitHub writes other than the five listed in the hook, and every
 server not listed in the hook.
 
-**Unverified:** the Airtable read-only names (`list_bases`,
-`list_tables_for_base`, `list_records_for_table`) and the `baseId` / `tableId`
-input names were not checked against a live Airtable MCP server (it was
-unreachable). If they differ, those calls are denied until corrected.
+**Airtable reads allowed:** `list_bases`, `list_tables_for_base`,
+`list_records_for_table`, `search_bases`, `get_table_schema`, `search_records`.
+Their names and input schemas, and the `baseId` / `tableId` input names of the
+record write tools, were checked against the live Airtable MCP tool list on
+2026-11-13 (schemas only; no Airtable call was made, and the server's
+`readOnlyHint` annotations were not observable). Every other Airtable tool,
+including other read tools, stays unclassified and denied.
 
 ### Known uncovered routes (do not read the hook as a boundary)
 
@@ -174,18 +187,12 @@ unreachable). If they differ, those calls are denied until corrected.
   tool calls, not network effects.
 - Hook installation, the matchers in the settings example, and the absolute
   hook path are the consumer's responsibility. Nothing here installs a hook.
-- Check-then-consume in `mcp/lib/airtable-client.js` is not atomic. That file
-  was not changed.
-
-### Tests
-
-```bash
-python3 -m unittest discover -s tests -v     # stdlib only; no network, no credentials
-```
-
-All tests run against temporary directories and an isolated
-`T0_GO_MARKER_PATH`. Payloads in `tests/fixtures/probes.json` are synthetic
-strings the hook reads as data; nothing in them is executed.
+- Consumption in `mcp/lib/airtable-client.js` is atomic across processes
+  (interim hardening from PR #2, kept by owner decision): an exclusive lock
+  file plus write-then-rename. Limits: a stale lock left by a crashed server
+  blocks writes until a human removes it; the marker is consumed before the
+  Airtable request, so a failed write burns it; no exactly-once effect on
+  Airtable is claimed.
 
 ## What this repo does not do
 
