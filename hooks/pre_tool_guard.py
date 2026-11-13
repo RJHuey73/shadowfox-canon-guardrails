@@ -32,8 +32,6 @@ still a local file, and an agent that holds a write credential can reach the
 protected surface by routes this hook does not see.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -58,6 +56,10 @@ TIER_2_SCOPES = {"tblX88U1VOwmK2fF5"}  # T0 Decision Log
 SUPABASE_REFS = {"mksmwqmphdkwwiyfesad", "oufyfdhjjvhrseythgrr"}
 
 MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
+# Shared marker contract with mcp/lib/airtable-client.js (ISSUED_AT_RE there),
+# pinned by tests/fixtures/marker_cases.json. Checked before parsing so the
+# accepted formats do not depend on the Python version's fromisoformat().
+ISSUED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?(?:Z|[+-]\d{2}:\d{2})$")
 FUTURE_SKEW = timedelta(seconds=60)
 DEFAULT_MARKER_PATH = ".claude/t0-go.json"
 
@@ -195,8 +197,9 @@ def load_marker(scope: str = "?", min_tier: int = 1) -> dict[str, Any]:
     if not isinstance(consumed, bool):
         raise Deny("MARKER_MALFORMED", "marker consumed must be a boolean")
     issued = marker.get("issued_at")
-    if not isinstance(issued, str):
-        raise Deny("MARKER_MALFORMED", "marker issued_at must be an ISO-8601 string")
+    if not isinstance(issued, str) or not ISSUED_AT_RE.match(issued):
+        raise Deny("MARKER_MALFORMED", "marker issued_at must be ISO-8601 with an explicit offset "
+                   "(YYYY-MM-DDTHH:MM:SS[.fff|.ffffff](Z|+HH:MM))")
     try:
         issued_at = datetime.fromisoformat(issued.replace("Z", "+00:00"))
     except ValueError:
@@ -317,7 +320,7 @@ def check_file_write(tool_name: str, tool_input: dict[str, Any]) -> None:
 
 @dataclass(frozen=True)
 class Classification:
-    kind: str  # "read_only" | "protected" | "out_of_scope"
+    kind: str  # "read_only" | "protected"
     scope: str = ""
     min_tier: int = 1
 
@@ -327,15 +330,15 @@ ScopeFn = Callable[[dict[str, Any]], Classification]
 
 @dataclass(frozen=True)
 class ProtectedRule:
-    server: "re.Pattern[str]"
-    tool: "re.Pattern[str]"
+    server: re.Pattern
+    tool: re.Pattern
     resolve: ScopeFn
 
 
 @dataclass(frozen=True)
 class ReadOnlyRule:
-    server: "re.Pattern[str]"
-    tools: frozenset[str]
+    server: re.Pattern
+    tools: frozenset
 
 
 def _fixed(scope: str, min_tier: int = 1) -> ScopeFn:
@@ -352,11 +355,14 @@ def _airtable_generic(tool_input: dict[str, Any]) -> Classification:
         raise Deny("INVALID_TOOL_INPUT", "Airtable write tableId must be a string")
     if base_id == CANON_BASE_ID:
         return Classification("protected", table_id or CANON_BASE_ID, 2 if table_id in TIER_2_SCOPES else 1)
-    # Writes to a non-Canon base are outside what this guardrail protects.
-    return Classification("out_of_scope")
+    # Owner decision (reconciliation 1c, 2026-11-13): Airtable writes to any
+    # non-Canon base are NOT authorized by this guardrail; they are denied as
+    # unclassified, like any other unclassified MCP operation.
+    raise Deny("UNCLASSIFIED_MCP", f"Airtable write to non-Canon base {base_id} is not classified",
+               "denied pending classification; this guardrail authorizes Airtable writes to the Canon base only")
 
 
-def _rx(pattern: str) -> "re.Pattern[str]":
+def _rx(pattern: str) -> re.Pattern:
     return re.compile(pattern)
 
 
@@ -375,11 +381,13 @@ READ_ONLY_RULES: list[ReadOnlyRule] = [
         "get_edge_function", "get_logs", "get_advisors", "get_project_url",
         "generate_typescript_types", "search_docs",
     })),
-    # Names below are taken from this repo's README / convention and are
-    # UNVERIFIED against a live Airtable MCP server (it was unreachable when
-    # this table was written). Correct them against the real tool list.
+    # Verified 2026-11-13 against the live Airtable MCP tool list; the tool
+    # descriptions and input schemas of each are read-only (no write
+    # parameters). The server's readOnlyHint annotations were not observable.
+    # Other Airtable tools stay unclassified (denied) by owner decision.
     ReadOnlyRule(_rx(r"Airtable"), frozenset({
         "list_bases", "list_tables_for_base", "list_records_for_table",
+        "search_bases", "get_table_schema", "search_records",
     })),
     ReadOnlyRule(_rx(r"sfx-canon-mcp"), frozenset({
         "canon_get_clusters", "canon_get_latest_entry", "canon_get_next_id",
