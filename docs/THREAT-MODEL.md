@@ -23,8 +23,9 @@ defends against. It is not a statement of Canon policy.
 
 ## Enforcement points
 
-1. `hooks/pre_tool_guard.py` (PreToolUse). A read-only marker check for Bash
-   and write-shaped MCP tool names. Exit 2 blocks. **Exit 0 or any other
+1. `hooks/pre_tool_guard.py` (PreToolUse). A read-only marker check for Bash,
+   the file-write tools, and every non-read tool in the governed MCP
+   namespaces (deny by default). Exit 2 blocks. **Exit 0 or any other
    exit code lets the call through**: Claude Code treats non-2 exit codes as
    non-blocking errors. So a crash in this hook *is* a fail-open.
 2. `mcp/lib/airtable-client.js` `requireT0Go()`. The authoritative, consuming
@@ -44,10 +45,10 @@ defends against. It is not a statement of Canon policy.
 | T6 | A generic Airtable MCP write to the Decision Log passes with a Tier 1 marker | **Observed** (the hook used kind-based tiers, not scope-based) | Minimum tier is derived from scope everywhere. |
 | T7 | A Canon-base Airtable call with a malformed `baseId`/`tableId` (non-string) crashes or skips the hook | **Observed** (crash = fail-open) | Blocks. |
 | T8 | Formula injection in `decisionlog_search` via `\"` | **Observed**: backslash not escaped | Backslash escaped first. Read-only impact only. |
-| T9 | Replay on hook-only write paths (GitHub, Supabase, generic Airtable MCP, Bash): the hook never consumes, so one marker allows unlimited calls within its TTL | **Observed**, and by design (documented) | **Not changed — authorization-model decision, flagged for T0.** Test pins current behaviour. |
-| T10 | The agent mints its own marker: Write/Edit tool or `echo >` to the marker path, or runs `issue_t0_go.py` via Bash | **Observed**: nothing guards the marker path or the issuer (`test_known_gaps.py::test_gap_t10_*`) | **Not changed — flagged for T0.** This is the main unresolved trust assumption. |
-| T11 | Write-capable tools outside the matcher set: `mcp__Airtable__submit_form`, `revert_action`, plugin-namespaced Airtable tools (`mcp__plugin_airtable_airtable__*`), `mcp__Supabase__execute_sql` and other Supabase mutators, GitHub `create_branch`/`enable_pr_auto_merge`/…, Bash `curl -X PATCH` to the Airtable API | **Observed** (tool names from this environment's live tool list) | **Not changed — expanding coverage is policy, flagged.** Tests pin current behaviour. |
-| T12 | Undecodable stdin to the hook is allowed | Documented design choice | Kept, flagged. A non-object JSON payload now takes the same documented path explicitly instead of crashing. |
+| T9 | Replay on hook-only write paths (GitHub, Supabase, Notion, generic Airtable MCP, Bash): the hook never consumes, so one marker allows unlimited calls within its TTL | **Observed**, and by design (documented) | **Not changed — needs the ADR-0001 broker.** The replay window is now bounded by the 3600 s TTL cap. Test pins current behaviour. |
+| T10 | The agent mints its own marker: Write/Edit tool or `echo >` to the marker path, or runs `issue_t0_go.py` via Bash | **Observed**: nothing guards the marker path or the issuer | **Partly closed.** Write/Edit/MultiEdit/NotebookEdit to the marker, its lock file or a symlink to it blocks; any Bash command naming the marker or the issuer blocks. Still open: a path built at runtime, and an agent editing `.claude/settings*.json` or the hook itself (`test_known_gaps.py::test_gap_t10_*`). Full closure needs the ADR-0001 broker. |
+| T11 | Write-capable tools outside the matcher set: `mcp__Airtable__submit_form`, `revert_action`, plugin-namespaced Airtable tools (`mcp__plugin_airtable_airtable__*`), `mcp__Supabase__execute_sql` and other Supabase mutators, GitHub `create_branch`/`enable_pr_auto_merge`/…, Bash `curl -X PATCH` to the Airtable API | **Observed** (tool names from this environment's live tool list) | **Closed for the governed namespaces.** Deny by default: inside Airtable, Supabase, Notion, GitHub and `sfx-*` servers (any prefix) only known reads pass; every other tool needs a marker, including tools added later. `execute_sql` is gated even for SELECT, since the hook cannot tell. HTTP write verbs and bodies gate like SQL keywords. Still open: generic automation connectors (Zapier, Make) and GitHub writes over Bash (`test_known_gaps.py::test_gap_t11_*`). |
+| T12 | Undecodable stdin to the hook is allowed | Documented design choice | **Closed.** Undecodable, empty or non-object input, or input naming no tool, blocks. The hook only sees calls its matchers route to it, so a harness bug now blocks those calls instead of passing them. |
 
 ## What a marker does and does not prove
 
@@ -63,10 +64,10 @@ separately as an ADR and is not part of this change. Tests that pin these gaps a
 
 ## Trust assumptions that remain
 
-- The agent cannot write the marker file or run the issuer (T10). Nothing in
-  this repo enforces this.
+- The agent cannot write the marker file or run the issuer (T10). The hook
+  blocks the plain paths only; nothing in this repo enforces it fully.
 - `decision_id` is free text and is not checked against the Decision Log.
-- `ttl_seconds` has no upper bound.
+- `ttl_seconds` is capped at 3600 s by the issuer and both readers.
 - The marker is consumed before the Airtable request runs. A failed write
   burns the marker (fail-closed, and the human re-mints).
 - A stale lock file left by a crashed server blocks further writes until a

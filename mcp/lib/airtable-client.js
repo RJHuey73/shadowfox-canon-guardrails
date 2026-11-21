@@ -141,6 +141,9 @@ const ISSUED_AT_RE =
 // A marker dated further ahead than this is refused: otherwise a future
 // issued_at stretches its lifetime without bound.
 const MAX_CLOCK_SKEW_MS = 60_000;
+// Upper bound on a marker's lifetime. Same value as MAX_TTL_SECONDS in
+// hooks/pre_tool_guard.py and hooks/issue_t0_go.py.
+export const MAX_TTL_SECONDS = 3600;
 
 const GoMarkerSchema = z.object({
   decision_id: z.string().min(1),
@@ -153,7 +156,7 @@ const GoMarkerSchema = z.object({
   // write, so minting one is itself a deliberate, heavier-weight act.
   tier: z.number().int().min(1).max(2).default(1),
   issued_at: z.string().regex(ISSUED_AT_RE, "must be ISO-8601 with a timezone offset"),
-  ttl_seconds: z.number().int().positive(),
+  ttl_seconds: z.number().int().positive().max(MAX_TTL_SECONDS),
   consumed: z.boolean().default(false),
 });
 

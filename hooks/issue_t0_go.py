@@ -27,6 +27,11 @@ from pathlib import Path
 
 DEFAULT_MARKER_PATH = Path(os.environ.get("T0_GO_MARKER_PATH", ".claude/t0-go.json"))
 
+# Upper bound on a marker's lifetime. Same value as MAX_TTL_SECONDS in
+# hooks/pre_tool_guard.py and mcp/lib/airtable-client.js, which refuse any
+# marker above it; tests check the three agree.
+MAX_TTL_SECONDS = 3600
+
 
 def _is_expired(marker: dict) -> bool:
     try:
@@ -46,7 +51,12 @@ def main() -> None:
         required=True,
         help="Table ID or sentinel string (github:write, supabase:apply_migration, ...). Repeatable.",
     )
-    parser.add_argument("--ttl", type=int, default=600, help="Seconds until this marker expires (default 600).")
+    parser.add_argument(
+        "--ttl",
+        type=int,
+        default=600,
+        help=f"Seconds until this marker expires (default 600, maximum {MAX_TTL_SECONDS}).",
+    )
     parser.add_argument(
         "--tier",
         type=int,
@@ -61,6 +71,8 @@ def main() -> None:
         help=f"Marker file path (default {DEFAULT_MARKER_PATH}).",
     )
     args = parser.parse_args()
+    if not 0 < args.ttl <= MAX_TTL_SECONDS:
+        parser.error(f"--ttl must be between 1 and {MAX_TTL_SECONDS} seconds (got {args.ttl}).")
 
     if args.path.exists():
         existing = json.loads(args.path.read_text())
