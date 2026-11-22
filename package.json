@@ -17,7 +17,7 @@
     "test:py:known-gaps": "python3 -m pytest -q -m known_gap"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.6.1",
-    "zod": "^3.23.8"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
   }
 }
