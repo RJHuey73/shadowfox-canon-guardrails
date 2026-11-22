@@ -139,7 +139,7 @@ PENDING ──approve──▶ APPROVED ──reserve──▶ DISPATCH_RESERVED
 **R1. Human-only issuance, outside agent authority.**
 - Approvals are created only through `approve.sock`, and only by a peer whose kernel-reported UID (`SO_PEERCRED` on Linux, `getpeereid`/`LOCAL_PEERCRED` on macOS) is the configured approver UID.
 - The deployment meets §2.1 P1–P7.
-- Optional: a local OS authentication prompt on the approver side (polkit / macOS LocalAuthentication). This adds assurance but is not the boundary.
+- Required (T0 decision 4, 2026-11-22; see §7): a local OS authentication prompt on the approver side for every approval (polkit / macOS LocalAuthentication). This adds assurance against an unattended approver session; it is not the boundary, which remains P1–P7.
 
 **R2. Request-bound, single-use approval.**
 - An approval binds exactly one `request_digest` (§2.2) of one immutable stored envelope (§2.3). It does not cover a table, a scope or a time window.
@@ -210,7 +210,7 @@ PENDING ──approve──▶ APPROVED ──reserve──▶ DISPATCH_RESERVED
 1. **Consumer inventory confirmed by T0.** As of 2026-10-23, a full-tree search of all 53 checkouts available to the authoring session, plus every `.claude/settings*.json` and MCP config in them, found no consumer of these hooks or servers. GitHub code search does not index these private repos, so that result is not evidence of absence. Local installs on T0's machines have to be listed by T0.
 2. **Canon write credentials inventoried and narrowed.** This needs Airtable access, which is currently blocked by the monthly limit.
 3. **§6.1 privilege-boundary checks pass on each target host.** They are recorded before any write credential is provisioned there.
-4. **A schema decision on `broker_request_id`** for exact create reconciliation (§2.4), or explicit acceptance that create reconciliation is candidate-based.
+4. **A schema decision on `broker_request_id`** for exact create reconciliation (§2.4), or explicit acceptance that create reconciliation is candidate-based. *Decided 2026-11-22 (§7, decision 1): add the field. The schema change itself needs Airtable access and its own execution GO.*
 5. **This ADR ratified** through the Promote-Gate (`Shadowfox-OS-Specification-Repository/docs/promote-gates/`). Until then it is a proposal.
 
 ## 6. Acceptance tests (for the implementation PR, not this ADR)
@@ -275,3 +275,18 @@ The broker is killed with `SIGKILL` at each injected fault point and then restar
 - **TTL:** both ceilings are enforced, and the agent cannot change them (P4).
 - **No write credential in agent space:** a static check that no agent-side module imports a write function, and that the agent-side environment has no Canon write PAT.
 - **Known-gap tests:** every Canon-route `known_gap` test is converted into a broker acceptance test or deleted with its gap closed. The GitHub and Supabase `known_gap` tests stay, because this ADR doesn't close them.
+
+## 7. T0 decisions (2026-11-22)
+
+Recorded from T0's "Go for all recommended" on 2026-11-22, which selected the recommended option for each open decision listed in PR #3. T0 did not restate them in their own words. **Recording these does not ratify this ADR** (decision 5), authorizes no implementation, schema change or credential change, and assigns no Canon ID.
+
+| # | Decision | Selected | Still needs |
+|---|---|---|---|
+| 1 | `broker_request_id` field | **Add it** to the Session Ledger, ATQ and Decision Log tables, so create reconciliation is exact (§2.4) | Airtable access (blocked by the monthly quota until 2026-12-01) and a separate execution GO for the schema change |
+| 2 | Approver and agent account layout | **Three accounts on the host T0 writes Canon from:** the human approver (T0's own login), an agent account that runs Claude Code, and a broker account that runs the daemon (§2.1) | The host to be named, and the §6.1 privilege-boundary checks run on it |
+| 3 | Lifetime ceilings | **Accept as written:** approval ≤ 15 min, pending request ≤ 60 min (R7) | — |
+| 4 | Approver-side OS authentication prompt | **Required** for every approval (R1, amended above) | — |
+| 5 | Ratification path | **Ratify the design first** through the Promote-Gate (`Shadowfox-OS-Specification-Repository/docs/promote-gates/`); implementation is a separate PR and a separate GO | A Canon ID, which needs a live Canon ID Registry query (COL-001), so after 2026-12-01 |
+| 6 | Blocking preconditions | **G3** (consumer inventory) is run by T0 now; **G4** (credential inventory) waits for Airtable | T0's G3 result; G4 after 2026-12-01 |
+
+Unchanged by these decisions: the hook's 3600 s marker cap (guardrails #5) still applies to the non-Canon routes this ADR leaves out (GitHub, Supabase, Notion).
