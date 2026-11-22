@@ -40,6 +40,9 @@ scaffold contained.
 | `hooks/pre_tool_guard.py` | `PreToolUse` hook, fail-closed on input it cannot read. Bash guard (destructive commands; SQL write keywords or HTTP writes naming a Canon/Supabase/Notion surface; any reference to the marker or the issuer), a file-tool guard on the marker path, and an MCP guard that is deny-by-default inside the Airtable, Supabase, Notion, GitHub and `sfx-*` namespaces: only known reads pass without a marker. |
 | `hooks/issue_t0_go.py` | Human-run CLI that mints a single-use, TTL-scoped GO marker. **Never invoke this from an agent session** — it exists specifically so the marker can only originate from a human at a keyboard. |
 | `config/settings.json.example` | Example `.claude/settings.json` wiring: `Bash`, the file-write tools, and every MCP server whose name contains a governed keyword. |
+| `.claude/hooks/github_transition_guard.py` | `PreToolUse` hook that stops consequential GitHub transitions from an agent session (merge, close, approve, pushes to protected branches, force pushes, repo settings, secrets, releases). Master copy; the same file ships in each Shadowfox repo. |
+| `.claude/settings.json` | Deny and ask permission rules plus the hook wiring for this repo. |
+| `tests/test_github_transition_guard.py` | Offline proof for the guard (88 cases, no network). Run `python3 -I tests/test_github_transition_guard.py`; set `GUARD_HOOK` to test another repo's copy. |
 
 ## The T0-GO marker — closes gap #2 (no in-path enforcement)
 
