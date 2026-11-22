@@ -37,9 +37,9 @@ scaffold contained.
 | `mcp/sfx-atq-mcp.js` | Write-scoped to Active Task Queue (`tblsVXX2XnhVLWMVE`) only. New — closes gap #1 from the 2026-09-03 session review. |
 | `mcp/sfx-decisionlog-mcp.js` | Write-scoped to T0 Decision Log (`tblX88U1VOwmK2fF5`) only. New — closes gap #1. |
 | `mcp/lib/airtable-client.js` | Shared HTTP + T0-GO-check helper. Table/base IDs are always passed in by the *caller's* hardcoded constants, never taken from tool input — this is what keeps the shared code from becoming a "write to any table" backdoor. |
-| `hooks/pre_tool_guard.py` | `PreToolUse` hook. Bash-surface regex guard (destructive commands, named Canon/Supabase surfaces — now including ATQ + Decision Log) **plus** MCP tool-name matching, so non-Bash write surfaces (Airtable MCP, `gh`-equivalent GitHub MCP calls, Supabase `apply_migration`) are covered too — closes gap #4. |
+| `hooks/pre_tool_guard.py` | `PreToolUse` hook, fail-closed on input it cannot read. Bash guard (destructive commands; SQL write keywords or HTTP writes naming a Canon/Supabase/Notion surface; any reference to the marker or the issuer), a file-tool guard on the marker path, and an MCP guard that is deny-by-default inside the Airtable, Supabase, Notion, GitHub and `sfx-*` namespaces: only known reads pass without a marker. |
 | `hooks/issue_t0_go.py` | Human-run CLI that mints a single-use, TTL-scoped GO marker. **Never invoke this from an agent session** — it exists specifically so the marker can only originate from a human at a keyboard. |
-| `config/settings.json.example` | Example `.claude/settings.json` wiring showing the hook matchers, including the non-Bash MCP tool names. |
+| `config/settings.json.example` | Example `.claude/settings.json` wiring: `Bash`, the file-write tools, and every MCP server whose name contains a governed keyword. |
 | `.claude/hooks/github_transition_guard.py` | `PreToolUse` hook that stops consequential GitHub transitions from an agent session (merge, close, approve, pushes to protected branches, force pushes, repo settings, secrets, releases). Master copy; the same file ships in each Shadowfox repo. |
 | `.claude/settings.json` | Deny and ask permission rules plus the hook wiring for this repo. |
 | `tests/test_github_transition_guard.py` | Offline proof for the guard (88 cases, no network). Run `python3 -I tests/test_github_transition_guard.py`; set `GUARD_HOOK` to test another repo's copy. |
@@ -54,6 +54,7 @@ before touching the network. The check is fail-closed:
 - Marker's `scope` doesn't list the target table ID → blocked.
 - Marker's `tier` is below what the write requires → blocked (see below).
 - `issued_at + ttl_seconds` has elapsed → blocked.
+- `ttl_seconds` above 3600 → blocked (the issuer refuses to mint one).
 - Marker already `consumed` → blocked.
 
 A successful check marks the marker consumed, so it can't be replayed. This
@@ -62,8 +63,10 @@ bypassable checkbox, the exact weakness this was built to close.
 `issue_t0_go.py` is the only *intended* writer of that file, and it is meant
 to be human-run. **Nothing enforces that.** The marker is an unsigned file in
 the session's working directory: an agent session that can write files or run
-Bash can create one or run the issuer itself (pinned in
-`tests/python/test_known_gaps.py`). A marker is therefore evidence that
+Bash can create one or run the issuer itself. The hook blocks the plain
+paths (Write/Edit to the marker, Bash naming it or the issuer), but a path
+built at runtime, or an edit that unregisters the hook, still gets through
+(pinned in `tests/python/test_known_gaps.py`). A marker is therefore evidence that
 *someone* wrote it, not proof that a human authorized the write; see
 `docs/THREAT-MODEL.md` (T10).
 
@@ -91,7 +94,7 @@ rules, pinned by `tests/fixtures/marker_cases.json` (both suites run it):
 top-level JSON object; `decision_id` non-empty string; `scope` non-empty list
 of non-empty strings; `tier` integer 1 or 2 (default 1); `issued_at`
 ISO-8601 with an explicit offset, at most 60 s in the future;
-`ttl_seconds` positive integer; `consumed` boolean (default false). Anything
+`ttl_seconds` integer from 1 to 3600; `consumed` boolean (default false). Anything
 else is refused. Consumption in `requireT0Go()` holds an exclusive
 `<marker>.lock` file for the read-check-consume step, so concurrent writes
 (including across the four servers) consume one marker once. A lock left by a

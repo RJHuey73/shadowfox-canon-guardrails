@@ -94,7 +94,7 @@ def test_valid_marker_through_the_configured_command_allows_and_does_not_consume
     marker = tmp_path / "t0-go.json"
     marker.write_text(json.dumps(valid_marker([SESSION])))
     before = marker.read_text()
-    command = settings_commands()["mcp__sfx-session-mcp__(session_open|session_close)"]
+    command = next(c for m, c in settings_commands().items() if m.startswith("mcp__"))
     proc = run_shell(command, json.dumps(GATED).encode(), {"T0_GO_MARKER_PATH": str(marker)})
     assert proc.returncode == 0, proc.stderr
     assert marker.read_text() == before  # the MCP server, not the hook, consumes
