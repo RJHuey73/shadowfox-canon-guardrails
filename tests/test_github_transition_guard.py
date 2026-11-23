@@ -105,6 +105,16 @@ def main() -> int:
         ("deny", mcp("mcp__github__create_pull_request_review", {"event": "APPROVE"}, F)),
         ("deny", mcp("mcp__github__push_files", {"branch": "main", "files": []}, F)),
         ("deny", mcp("mcp__GitHub__delete_file", {"path": "x"}, F)),
+        # ---- deny: MCP tool names outside the original list (relay 2026-11-23)
+        ("deny", mcp("mcp__GitHub__create_file", {"branch": "main", "path": "x"}, F)),
+        ("deny", mcp("mcp__GitHub__update_file", {"branch": "main", "path": "x"}, F)),
+        ("deny", mcp("mcp__GitHub__create_commit", {"path": "x"}, F)),
+        ("deny", mcp("mcp__GitHub__update_ref", {"ref": "refs/heads/main", "sha": "abc"}, F)),
+        ("deny", mcp("mcp__GitHub__create_branch", {"branch": "main"}, F)),
+        ("deny", mcp("mcp__GitHub__add_review_to_pr", {"action": "APPROVE"}, F)),
+        ("deny", mcp("mcp__github__add_issue_comment", {"body": "@dependabot merge"}, F)),
+        # ---- ask: unclassified GitHub MCP tool (synthetic name)
+        ("ask", mcp("mcp__GitHub__set_workflow_permissions", {"enabled": False}, F)),
         # ---- ask
         ("ask", bash(f"gh api -X POST {R}/pulls/97/ccr/ready_for_review", F)),
         ("ask", bash("gh pr ready 97", F)),
@@ -138,6 +148,14 @@ def main() -> int:
         ("allow", bash("git status && git log --oneline -3", F)),
         ("allow", mcp("mcp__github__create_pull_request", {"draft": True}, F)),
         ("allow", mcp("mcp__github__push_files", {"branch": "claude/x", "files": []}, F)),
+        ("allow", mcp("mcp__GitHub__create_file", {"branch": "claude/x", "path": "x"}, F)),
+        ("allow", mcp("mcp__GitHub__update_ref", {"ref": "refs/heads/claude/x", "sha": "abc"}, F)),
+        ("allow", mcp("mcp__GitHub__create_branch", {"branch": "claude/x"}, F)),
+        ("allow", mcp("mcp__GitHub__add_review_to_pr", {"action": "COMMENT", "body": "ok"}, F)),
+        ("allow", mcp("mcp__github__add_issue_comment", {"body": "@dependabot rebase"}, F)),
+        ("allow", mcp("mcp__github__get_file_contents", {"path": "x"}, F)),
+        ("allow", mcp("mcp__github__pull_request_read", {"method": "get"}, F)),
+        ("allow", mcp("mcp__GitHub__rerun_workflow_job", {"job_id": 1}, F)),
         ("allow", mcp("mcp__Airtable__list_bases", {}, F)),
         ("allow", {"tool_name": "Read", "tool_input": {"file_path": "/x"}, "cwd": F}),
     ]

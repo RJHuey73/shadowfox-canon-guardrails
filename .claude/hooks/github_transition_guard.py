@@ -20,7 +20,8 @@ Platform controls (branch protection, an agent identity without merge
 rights) are the durable fix.
 
 Output: a PreToolUse permissionDecision of deny or ask, or nothing (allow).
-Any internal error denies (fail closed).
+Any internal error denies (fail closed). A GitHub MCP tool the guard does not
+recognise asks; it is never silently allowed.
 
 Config: SFX_PROTECTED_BRANCHES, a comma list (default "main,master"). The
 repository's origin default branch is added when it can be read.
@@ -559,6 +560,21 @@ def classify_bash(command: str, cwd: str, depth: int = 0):
 # --------------------------------------------------------------------- MCP
 
 MCP_NAME = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$")
+MCP_READ = re.compile(r"^(?:get|list|search|read|fetch|download)(?:_|$)|_read$")
+MCP_FILE_WRITES = {"push_files", "create_or_update_file", "create_file", "update_file", "create_commit"}
+MCP_REF_WRITES = {"create_branch", "create_ref", "update_ref"}
+MCP_KNOWN_WRITES = {
+    "create_pull_request",
+    "update_pull_request",
+    "update_pull_request_branch",
+    "create_issue",
+    "update_issue",
+    "issue_write",
+}
+
+
+def ref_branch(ref: object) -> str:
+    return str(ref or "").removeprefix("refs/").removeprefix("heads/")
 
 
 def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
@@ -568,26 +584,43 @@ def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
     tool = m.group("tool").lower()
     state = str(tool_input.get("state", "")).lower()
     event = str(tool_input.get("event", "")).upper()
+    action = str(tool_input.get("action", "")).upper()
     branch = str(tool_input.get("branch", ""))
     if "merge_pull_request" in tool or "auto_merge" in tool:
         return finding(DENY, "MERGE_PR", tool_name)
     closing = state == "closed"
     if closing and tool in ("update_pull_request", "update_issue", "issue_write"):
         return finding(DENY, "CLOSE_PR_OR_ISSUE", tool_name)
-    if "review" in tool and event == "APPROVE":
+    if "review" in tool and "APPROVE" in (event, action):
         return finding(DENY, "APPROVE_PR", tool_name)
     if tool in ("delete_file", "delete_repository", "delete_branch"):
         return finding(DENY, "DELETE", tool_name)
-    writes_file = tool in ("push_files", "create_or_update_file")
-    if writes_file and (not branch or branch in protected_branches(cwd)):
-        return finding(
-            DENY,
-            "WRITE_TO_DEFAULT_OR_PROTECTED_BRANCH",
-            f"branch={branch or 'default'}",
-        )
+    if tool in MCP_FILE_WRITES:
+        if not branch or branch in protected_branches(cwd):
+            return finding(
+                DENY,
+                "WRITE_TO_DEFAULT_OR_PROTECTED_BRANCH",
+                f"branch={branch or 'default'}",
+            )
+        return None
     if tool in ("create_repository", "fork_repository"):
         return finding(ASK, "CREATE_REPOSITORY", tool_name)
-    return None
+    if MCP_READ.search(tool):
+        return None
+    if "comment" in tool:
+        if DEPENDABOT_CMD.search(str(tool_input.get("body", ""))):
+            return finding(DENY, "DEPENDABOT_COMMAND", tool_name)
+        return None
+    if tool in MCP_REF_WRITES:
+        target = ref_branch(tool_input.get("ref") or branch)
+        if not target or target.startswith("tags/") or target in protected_branches(cwd):
+            return finding(DENY, "PROTECTED_REF", f"{tool_name} {target or 'unresolved'}")
+        return None
+    # Non-approving reviews and reruns stay allowed, matching the Bash path.
+    if "review" in tool or "rerun" in tool or tool in MCP_KNOWN_WRITES:
+        return None
+    # Default for a GitHub tool this guard does not recognise: ask, never allow.
+    return finding(ASK, "UNCLASSIFIED_GITHUB_MCP_TOOL", tool_name)
 
 
 # -------------------------------------------------------------------- main
