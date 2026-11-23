@@ -20,8 +20,10 @@ file, a heredoc, inline code for other interpreters, or a command string
 that is computed rather than written out. Platform controls (branch
 protection, an agent identity without merge rights) are the durable fix.
 
-MCP file writes aimed at a repository other than this session's origin are
-denied: that repository's default branch cannot be known here.
+MCP file and ref writes aimed at a repository other than this session's
+origin, or naming it incompletely, are denied: that repository's protected
+branches cannot be known here. Writes that omit the repository ask. Forced
+MCP ref updates are denied.
 
 Output: a PreToolUse permissionDecision of deny or ask, or nothing (allow).
 Any internal error denies (fail closed). A GitHub MCP tool the guard does not
@@ -110,9 +112,28 @@ def current_branch(repo_dir: str) -> str | None:
     return run_git(repo_dir, "symbolic-ref", "--short", "-q", "HEAD")
 
 
+def ref_target(value) -> tuple[str, str] | None:
+    """(kind, name) for a branch or ref value, kind "branch" or "tag".
+
+    Accepts name, heads/name, refs/heads/name, tags/name and refs/tags/name.
+    None when the value is not a string or names nothing, so a caller can
+    treat it as unresolved rather than as a safe branch.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip().removeprefix("refs/")
+    if v.startswith("tags/"):
+        kind, name = "tag", v[len("tags/"):]
+    else:
+        kind, name = "branch", v.removeprefix("heads/")
+    return (kind, name) if name else None
+
+
 def branch_name(value) -> str:
-    """Bare branch name. GitHub accepts refs/heads/<name> wherever it takes a branch."""
-    return str(value).strip().removeprefix("refs/heads/")
+    """Bare branch name, or "" when the value is not a usable branch.
+    GitHub accepts refs/heads/<name> wherever it takes a branch."""
+    target = ref_target(value)
+    return target[1] if target and target[0] == "branch" else ""
 
 
 REMOTE_SLUG = re.compile(r"[:/](?P<owner>[^/:]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
@@ -643,21 +664,106 @@ def classify_bash(command: str, cwd: str, depth: int = 0):
 # --------------------------------------------------------------------- MCP
 
 MCP_NAME = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$")
-MCP_READ = re.compile(r"^(?:get|list|search|read|fetch|download)(?:_|$)|_read$")
-MCP_FILE_WRITES = {"push_files", "create_or_update_file", "create_file", "update_file", "create_commit"}
-MCP_REF_WRITES = {"create_branch", "create_ref", "update_ref"}
-MCP_KNOWN_WRITES = {
-    "create_pull_request",
-    "update_pull_request",
-    "update_pull_request_branch",
-    "create_issue",
-    "update_issue",
-    "issue_write",
-}
+
+# Tools this guard recognises, by exact name. Names follow the GitHub MCP
+# server's published tool list as known when this was written; they are not
+# checked against a live server. Any other GitHub tool asks, whatever its name
+# looks like (a "get_" prefix or a "comment" infix earns nothing).
+MCP_READ_TOOLS = frozenset({
+    "get_me", "get_file_contents", "get_commit", "list_commits", "list_branches",
+    "list_tags", "get_tag", "search_code", "search_repositories", "search_issues",
+    "search_pull_requests", "search_users", "get_issue", "list_issues",
+    "get_issue_comments", "issue_read", "get_pull_request", "list_pull_requests",
+    "get_pull_request_diff", "get_pull_request_files", "get_pull_request_status",
+    "get_pull_request_comments", "get_pull_request_reviews", "pull_request_read",
+    "list_workflows", "list_workflow_runs", "get_workflow_run", "list_workflow_jobs",
+    "get_job_logs", "get_workflow_run_logs", "list_workflow_run_artifacts",
+    "download_workflow_run_artifact", "list_releases", "get_latest_release",
+    "get_release_by_tag",
+})
+MCP_FILE_WRITES = frozenset({"push_files", "create_or_update_file", "create_file", "update_file", "create_commit"})
+MCP_REF_WRITES = frozenset({"create_branch", "create_ref", "update_ref"})
+MCP_COMMENT_TOOLS = frozenset({"add_issue_comment", "add_comment_to_pending_review"})
+MCP_REVIEW_TOOLS = frozenset({
+    "create_pull_request_review", "pull_request_review_write", "create_pending_pull_request_review",
+    "submit_pending_pull_request_review", "add_review_to_pr", "request_copilot_review",
+})
+# Reruns are allowed by policy, as on the Bash path.
+MCP_RERUN_TOOLS = frozenset({"rerun_workflow_run", "rerun_failed_jobs", "rerun_workflow_job"})
+MCP_PR_ISSUE_WRITES = frozenset({
+    "create_pull_request", "update_pull_request", "update_pull_request_branch",
+    "create_issue", "update_issue", "issue_write",
+})
+APPROVE_VALUES = {"APPROVE", "APPROVED"}
 
 
-def ref_branch(ref: object) -> str:
-    return str(ref or "").removeprefix("refs/").removeprefix("heads/")
+def approves(tool_input: dict) -> bool:
+    """True when any top-level string argument other than the free-text body
+    is an approval, whatever its key (event, action, review_event, ...)."""
+    return any(
+        isinstance(v, str) and v.strip().upper() in APPROVE_VALUES
+        for k, v in tool_input.items()
+        if k != "body"
+    )
+
+
+def is_protected(name: str, cwd: str) -> bool:
+    return name in protected_branches(cwd)
+
+
+def target_repo_finding(tool_name: str, tool_input: dict, cwd: str):
+    """None when the call names this checkout's origin repository.
+
+    Both owner and repo omitted: ask, because no verified tool schema says
+    what they default to. Incomplete or non-string identity, an unreadable
+    origin, or a different repository: deny, because that repository's
+    protected branches cannot be known from this checkout.
+    """
+    if "owner" not in tool_input and "repo" not in tool_input:
+        return finding(ASK, "UNRESOLVED_TARGET_REPOSITORY", f"{tool_name}: owner/repo omitted")
+    owner, repo = tool_input.get("owner"), tool_input.get("repo")
+    if not (isinstance(owner, str) and owner.strip() and isinstance(repo, str) and repo.strip()):
+        return finding(DENY, "INCOMPLETE_TARGET_REPOSITORY", f"{tool_name}: owner/repo incomplete")
+    origin = origin_slug(cwd)
+    if origin is None:
+        return finding(DENY, "UNRESOLVED_ORIGIN", f"{tool_name}: this checkout's origin is unknown")
+    if f"{owner.strip()}/{repo.strip()}".lower() != origin:
+        return finding(
+            DENY,
+            "WRITE_TO_OTHER_REPOSITORY",
+            f"{owner}/{repo}: its default branch is unknown from this session",
+        )
+    return None
+
+
+def file_write_finding(tool_name: str, tool_input: dict, cwd: str):
+    branch = branch_name(tool_input.get("branch", ""))
+    if not branch or is_protected(branch, cwd):
+        return finding(
+            DENY,
+            "WRITE_TO_DEFAULT_OR_PROTECTED_BRANCH",
+            f"branch={branch or 'default or unresolved'}",
+        )
+    return None
+
+
+def force_finding(tool_name: str, tool_input: dict):
+    """Forced ref updates deny. Only an absent key or literal false passes;
+    any other value is ambiguous and asks rather than being read as false."""
+    if "force" not in tool_input or tool_input["force"] is False:
+        return None
+    value = tool_input["force"]
+    if value is True or (isinstance(value, str) and value.strip().lower() == "true"):
+        return finding(DENY, "FORCE_UPDATE_REF", tool_name)
+    return finding(ASK, "AMBIGUOUS_FORCE_VALUE", f"{tool_name}: force={value!r}")
+
+
+def ref_write_finding(tool_name: str, tool_input: dict, cwd: str):
+    target = ref_target(tool_input.get("ref") or tool_input.get("branch"))
+    if target is None or target[0] == "tag" or is_protected(target[1], cwd):
+        label = f"{target[0]}={target[1]}" if target else "unresolved"
+        return finding(DENY, "PROTECTED_REF", f"{tool_name} {label}")
+    return None
 
 
 def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
@@ -666,49 +772,35 @@ def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
         return None
     tool = m.group("tool").lower()
     state = str(tool_input.get("state", "")).lower()
-    event = str(tool_input.get("event", "")).upper()
-    action = str(tool_input.get("action", "")).upper()
-    branch = branch_name(tool_input.get("branch", ""))
+    # Consequential transitions deny by name, recognised or not.
     if "merge_pull_request" in tool or "auto_merge" in tool:
         return finding(DENY, "MERGE_PR", tool_name)
-    closing = state == "closed"
-    if closing and tool in ("update_pull_request", "update_issue", "issue_write"):
+    if state == "closed" and tool in ("update_pull_request", "update_issue", "issue_write"):
         return finding(DENY, "CLOSE_PR_OR_ISSUE", tool_name)
-    if "review" in tool and "APPROVE" in (event, action):
+    if "review" in tool and approves(tool_input):
         return finding(DENY, "APPROVE_PR", tool_name)
     if tool in ("delete_file", "delete_repository", "delete_branch"):
         return finding(DENY, "DELETE", tool_name)
+    if "comment" in tool and DEPENDABOT_CMD.search(str(tool_input.get("body", ""))):
+        return finding(DENY, "DEPENDABOT_COMMAND", tool_name)
+    # Writes to repository contents and refs.
     if tool in MCP_FILE_WRITES:
-        owner, repo = tool_input.get("owner"), tool_input.get("repo")
-        target = f"{owner}/{repo}".lower()
-        if (owner or repo) and target != origin_slug(cwd):
-            return finding(
-                DENY,
-                "WRITE_TO_OTHER_REPOSITORY",
-                f"{owner}/{repo}: its default branch is unknown from this session",
-            )
-        if not branch or branch in protected_branches(cwd):
-            return finding(
-                DENY,
-                "WRITE_TO_DEFAULT_OR_PROTECTED_BRANCH",
-                f"branch={branch or 'default'}",
-            )
-        return None
+        return strongest([
+            file_write_finding(tool_name, tool_input, cwd),
+            target_repo_finding(tool_name, tool_input, cwd),
+        ])
+    if tool in MCP_REF_WRITES:
+        return strongest([
+            ref_write_finding(tool_name, tool_input, cwd),
+            target_repo_finding(tool_name, tool_input, cwd),
+            force_finding(tool_name, tool_input),
+        ])
     if tool in ("create_repository", "fork_repository"):
         return finding(ASK, "CREATE_REPOSITORY", tool_name)
-    if MCP_READ.search(tool):
-        return None
-    if "comment" in tool:
-        if DEPENDABOT_CMD.search(str(tool_input.get("body", ""))):
-            return finding(DENY, "DEPENDABOT_COMMAND", tool_name)
-        return None
-    if tool in MCP_REF_WRITES:
-        target = ref_branch(tool_input.get("ref") or branch)
-        if not target or target.startswith("tags/") or target in protected_branches(cwd):
-            return finding(DENY, "PROTECTED_REF", f"{tool_name} {target or 'unresolved'}")
-        return None
-    # Non-approving reviews and reruns stay allowed, matching the Bash path.
-    if "review" in tool or "rerun" in tool or tool in MCP_KNOWN_WRITES:
+    if tool == "update_pull_request" and "draft" in tool_input and tool_input["draft"] is not True:
+        return finding(ASK, "MARK_READY_FOR_REVIEW", tool_name)
+    # Recognised tools with no consequential effect in the arguments above.
+    if tool in MCP_READ_TOOLS | MCP_COMMENT_TOOLS | MCP_REVIEW_TOOLS | MCP_RERUN_TOOLS | MCP_PR_ISSUE_WRITES:
         return None
     # Default for a GitHub tool this guard does not recognise: ask, never allow.
     return finding(ASK, "UNCLASSIFIED_GITHUB_MCP_TOOL", tool_name)

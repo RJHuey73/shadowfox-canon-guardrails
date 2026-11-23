@@ -54,6 +54,9 @@ def main() -> int:
     # sessions), and one whose origin default branch is `develop`.
     S = make_repo("claude/x", origin="http://local_proxy@127.0.0.1:9/git/RJHuey73/smse-engine")
     D = make_repo("claude/x", origin="git@github.com:RJHuey73/maxun.git", origin_head="develop")
+    # Origin RJHuey73/tridecagon-agents, for same-repository MCP write cases.
+    O = make_repo("claude/x", origin="https://github.com/RJHuey73/tridecagon-agents.git")
+    ID = {"owner": "RJHuey73", "repo": "tridecagon-agents"}
     py_merge = "import os; os.system('gh pr merge 5 --squash')"
     py_list = "import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])"
     py_var = "import subprocess as s; c = 'gh pr merge 5'; s.run(c, shell=True)"
@@ -80,6 +83,59 @@ def main() -> int:
         ("allow", bash("python3 -c \"print('gh pr merge 5')\"", F)),
         ("allow", bash("python3 -c \"import subprocess; subprocess.run(['git', 'status'])\"", F)),
         ("allow", bash("python3 -c 'import json, sys; print(json.load(sys.stdin))'", F)),
+        # ---- R1-R4 regression cases (corrective review 2026-11-23). MCP
+        # payloads are SYNTHETIC: names and argument shapes are not taken from
+        # a verified connector schema.
+        # R1: branch and ref forms normalise before the protected-branch check
+        ("deny", mcp("mcp__GitHub__create_or_update_file", {**ID, "branch": "refs/heads/main", "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__create_file", {**ID, "branch": "heads/main", "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__update_file", {**ID, "branch": " main ", "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__create_commit", {**ID, "branch": "refs/heads/master"}, O)),
+        ("deny", mcp("mcp__GitHub__create_file", {**ID, "branch": ["main"], "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__create_file", {**ID, "branch": "refs/tags/v1", "path": "x"}, O)),
+        ("allow", mcp("mcp__GitHub__create_file", {**ID, "branch": "refs/heads/claude/x", "path": "x"}, O)),
+        ("deny", bash(f"gh api -X PUT {R}/contents/x.md -f message=m -f content=eA== -f branch=heads/main", O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "heads/main", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "main", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__create_ref", {**ID, "ref": "refs/heads/main", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__create_branch", {**ID, "branch": "refs/heads/main"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "tags/v1", "sha": "a"}, O)),
+        # R2: only named tools are recognised; look-alike names ask
+        ("ask", mcp("mcp__GitHub__list_and_delete_workflow_runs", {}, F)),
+        ("ask", mcp("mcp__GitHub__search_and_replace_files", {}, F)),
+        ("ask", mcp("mcp__GitHub__fetch_and_merge_upstream", {}, F)),
+        ("ask", mcp("mcp__GitHub__repo_secret_read", {}, F)),
+        ("ask", mcp("mcp__GitHub__comment_and_close_issue", {}, F)),
+        ("ask", mcp("mcp__GitHub__update_issue_comment", {"body": "x"}, F)),
+        ("ask", mcp("mcp__GitHub__dismiss_pull_request_review", {}, F)),
+        ("ask", mcp("mcp__GitHub__rerun_and_deploy", {}, F)),
+        ("ask", mcp("mcp__GitHub__update_pull_request", {"pullNumber": 1, "draft": False}, F)),
+        ("deny", mcp("mcp__GitHub__add_review_to_pr", {"review_event": "APPROVE"}, F)),
+        ("deny", mcp("mcp__GitHub__pull_request_review_write", {"method": "create", "event": "approve"}, F)),
+        ("allow", mcp("mcp__GitHub__pull_request_review_write", {"method": "create", "event": "COMMENT", "body": "Approved"}, F)),
+        ("allow", mcp("mcp__GitHub__list_pull_requests", {}, F)),
+        ("allow", mcp("mcp__GitHub__add_issue_comment", {"body": "thanks"}, F)),
+        ("allow", mcp("mcp__GitHub__rerun_failed_jobs", {"run_id": 1}, F)),
+        ("allow", mcp("mcp__GitHub__update_pull_request", {"pullNumber": 1, "draft": True}, F)),
+        # R3: target repository for MCP file and ref writes
+        ("allow", mcp("mcp__GitHub__create_file",
+                      {"owner": "rjhuey73", "repo": "Tridecagon-Agents", "branch": "claude/x", "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__create_file", {"owner": "RJHuey73", "repo": "other", "branch": "claude/x", "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__update_file", {"owner": "RJHuey73", "branch": "claude/x", "path": "x"}, O)),
+        ("deny", mcp("mcp__GitHub__create_commit", {"repo": "tridecagon-agents", "branch": "claude/x"}, O)),
+        ("deny", mcp("mcp__GitHub__push_files", {"owner": 123, "repo": "tridecagon-agents", "branch": "claude/x", "files": []}, O)),
+        ("deny", mcp("mcp__GitHub__create_file", {**ID, "branch": "claude/x", "path": "x"}, F)),
+        ("deny", mcp("mcp__GitHub__update_ref", {"owner": "RJHuey73", "repo": "other", "ref": "refs/heads/claude/x", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__create_file", {"branch": "main", "path": "x"}, O)),
+        # R4: forced MCP ref updates deny; ambiguous force values ask
+        ("allow", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": False}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": True}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": "true"}, O)),
+        ("ask", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": "false"}, O)),
+        ("ask", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": 1}, O)),
+        ("ask", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": None}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/main", "sha": "a", "force": False}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/tags/v1", "sha": "a", "force": False}, O)),
         # ---- deny: merge / auto-merge / close / approve
         ("deny", bash("gh pr merge 97 --squash", F)),
         ("deny", bash(f"gh api -X PUT {R}/pulls/97/merge -f merge_method=squash", F)),
@@ -181,10 +237,16 @@ def main() -> int:
         ("allow", bash('grep -rn "gh pr merge" docs', F)),
         ("allow", bash("git status && git log --oneline -3", F)),
         ("allow", mcp("mcp__github__create_pull_request", {"draft": True}, F)),
-        ("allow", mcp("mcp__github__push_files", {"branch": "claude/x", "files": []}, F)),
-        ("allow", mcp("mcp__GitHub__create_file", {"branch": "claude/x", "path": "x"}, F)),
-        ("allow", mcp("mcp__GitHub__update_ref", {"ref": "refs/heads/claude/x", "sha": "abc"}, F)),
-        ("allow", mcp("mcp__GitHub__create_branch", {"branch": "claude/x"}, F)),
+        # Expectation changed allow -> ask (R3): a write that omits owner/repo
+        # no longer assumes this repository. Same-repository variants follow.
+        ("ask", mcp("mcp__github__push_files", {"branch": "claude/x", "files": []}, F)),
+        ("ask", mcp("mcp__GitHub__create_file", {"branch": "claude/x", "path": "x"}, F)),
+        ("ask", mcp("mcp__GitHub__update_ref", {"ref": "refs/heads/claude/x", "sha": "abc"}, F)),
+        ("ask", mcp("mcp__GitHub__create_branch", {"branch": "claude/x"}, F)),
+        ("allow", mcp("mcp__github__push_files", {**ID, "branch": "claude/x", "files": []}, O)),
+        ("allow", mcp("mcp__GitHub__create_file", {**ID, "branch": "claude/x", "path": "x"}, O)),
+        ("allow", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "abc"}, O)),
+        ("allow", mcp("mcp__GitHub__create_branch", {**ID, "branch": "claude/x"}, O)),
         ("allow", mcp("mcp__GitHub__add_review_to_pr", {"action": "COMMENT", "body": "ok"}, F)),
         ("allow", mcp("mcp__github__add_issue_comment", {"body": "@dependabot rebase"}, F)),
         ("allow", mcp("mcp__github__get_file_contents", {"path": "x"}, F)),
