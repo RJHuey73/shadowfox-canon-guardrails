@@ -15,10 +15,15 @@ HOOK = os.environ.get("GUARD_HOOK") or os.path.join(HERE, "..", ".claude", "hook
 R = "repos/RJHuey73/tridecagon-agents"
 
 
-def make_repo(branch: str) -> str:
+def make_repo(branch: str, origin: str | None = None, origin_head: str | None = None) -> str:
     d = tempfile.mkdtemp(prefix=f"guard-{branch.replace('/', '-')}-")
     env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
-    for cmd in (["init", "-q", "-b", branch], ["commit", "-q", "--allow-empty", "-m", "x"]):
+    cmds = [["init", "-q", "-b", branch], ["commit", "-q", "--allow-empty", "-m", "x"]]
+    if origin:
+        cmds.append(["remote", "add", "origin", origin])
+    if origin_head:
+        cmds.append(["symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{origin_head}"])
+    for cmd in cmds:
         subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", *cmd],
                        check=True, env=env)
     return d
@@ -45,7 +50,36 @@ def main() -> int:
     on_main = make_repo("main")
     on_feature = make_repo("claude/universal-agent-contract-tlz938")
     F = on_feature
+    # A clone whose origin is RJHuey73/smse-engine (proxy-style URL, as in cloud
+    # sessions), and one whose origin default branch is `develop`.
+    S = make_repo("claude/x", origin="http://local_proxy@127.0.0.1:9/git/RJHuey73/smse-engine")
+    D = make_repo("claude/x", origin="git@github.com:RJHuey73/maxun.git", origin_head="develop")
+    py_merge = "import os; os.system('gh pr merge 5 --squash')"
+    py_list = "import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])"
+    py_var = "import subprocess as s; c = 'gh pr merge 5'; s.run(c, shell=True)"
     cases = [
+        # ---- deny: gaps found in the 2026-11-22 review (each allowed before the fix)
+        ("deny", mcp("mcp__github__create_or_update_file", {"branch": "refs/heads/main", "path": "x"}, F)),
+        ("deny", mcp("mcp__github__push_files", {"branch": "refs/heads/master", "files": []}, F)),
+        ("deny", bash(f"gh api -X PUT {R}/contents/x.md -f message=m -f content=eA== -f branch=refs/heads/main", F)),
+        ("deny", mcp("mcp__github__push_files",
+                     {"owner": "RJHuey73", "repo": "maxun", "branch": "develop", "files": []}, S)),
+        ("deny", mcp("mcp__github__create_or_update_file",
+                     {"owner": "RJHuey73", "repo": "other-repo", "branch": "claude/x", "path": "x"}, F)),
+        ("deny", bash(f'python3 -c "{py_merge}"', F)),
+        ("deny", bash(f'python3 -I -c "{py_list}"', F)),
+        ("deny", bash(f'python3 -c "{py_var}"', F)),
+        ("deny", bash("python3 -c 'import os; os.system(\"gh pr merge 5\"'", F)),
+        # ---- non-regression for the same fixes
+        ("deny", mcp("mcp__github__push_files",
+                     {"owner": "RJHuey73", "repo": "maxun", "branch": "develop", "files": []}, D)),
+        ("allow", mcp("mcp__github__push_files",
+                      {"owner": "rjhuey73", "repo": "SMSE-engine", "branch": "claude/x", "files": []}, S)),
+        ("allow", mcp("mcp__github__create_or_update_file",
+                      {"owner": "RJHuey73", "repo": "maxun", "branch": "claude/x", "path": "x"}, D)),
+        ("allow", bash("python3 -c \"print('gh pr merge 5')\"", F)),
+        ("allow", bash("python3 -c \"import subprocess; subprocess.run(['git', 'status'])\"", F)),
+        ("allow", bash("python3 -c 'import json, sys; print(json.load(sys.stdin))'", F)),
         # ---- deny: merge / auto-merge / close / approve
         ("deny", bash("gh pr merge 97 --squash", F)),
         ("deny", bash(f"gh api -X PUT {R}/pulls/97/merge -f merge_method=squash", F)),
