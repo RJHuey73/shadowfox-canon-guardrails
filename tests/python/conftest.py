@@ -89,3 +89,18 @@ def run_hook(marker_path):
         return proc
 
     return _run
+
+
+def pytest_terminal_summary(terminalreporter):
+    """Print the transition-guard suite's own totals, which
+    test_transition_guard_suite.py records on a passing run."""
+    lines = [
+        value
+        for report in terminalreporter.stats.get("passed", [])
+        for name, value in report.user_properties
+        if name == "transition_guard_suite"
+    ]
+    if lines:
+        terminalreporter.write_sep("-", "transition guard suite")
+        for line in lines:
+            terminalreporter.write_line(line)
