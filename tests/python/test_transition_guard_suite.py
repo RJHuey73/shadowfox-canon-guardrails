@@ -20,7 +20,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SUITE = ROOT / "tests" / "test_github_transition_guard.py"
 HOOK = ROOT / ".claude" / "hooks" / "github_transition_guard.py"
-SUMMARY = re.compile(r"^(?P<passed>\d+) passed, (?P<failed>\d+) failed \((?P<total>\d+) cases\)$", re.M)
+SUMMARY = re.compile(r"^(?P<passed>\d+) passed, (?P<failed>\d+) failed \((?P<total>\d+) cases\)$", re.MULTILINE)
 
 
 def test_transition_guard_suite_passes(record_property):
