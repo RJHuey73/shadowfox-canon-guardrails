@@ -165,6 +165,8 @@ def main() -> int:
         ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "", "branch": "main", "sha": "a"}, O)),
         ("deny", mcp("mcp__GitHub__create_branch", {**ID, "branch": "claude/x", "ref": "main"}, O)),
         ("deny", mcp("mcp__GitHub__create_ref", {**ID, "ref": "refs/heads/claude/x", "branch": "refs/tags/v1", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__create_branch", {**ID}, O)),
         # R4: forced MCP ref updates deny; ambiguous force values ask
         ("allow", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": False}, O)),
         ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": True}, O)),
