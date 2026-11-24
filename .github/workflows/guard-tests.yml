@@ -1,0 +1,25 @@
+# Offline proof for .claude/hooks/github_transition_guard.py.
+# Scope: runs the existing test script only. No secrets, read-only token.
+name: guard-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  guard-transition-tests:
+    name: guard-transition-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show interpreter
+        run: python3 --version
+      - name: Run guard tests
+        run: python3 -I tests/test_github_transition_guard.py
