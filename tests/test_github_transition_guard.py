@@ -155,6 +155,16 @@ def main() -> int:
         ("deny", mcp("mcp__GitHub__create_file", {**ID, "branch": "claude/x", "path": "x"}, F)),
         ("deny", mcp("mcp__GitHub__update_ref", {"owner": "RJHuey73", "repo": "other", "ref": "refs/heads/claude/x", "sha": "a"}, O)),
         ("deny", mcp("mcp__GitHub__create_file", {"branch": "main", "path": "x"}, O)),
+        # FU1: every present ref/branch field is checked; a conflict does not let one win
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "branch": "main", "sha": "a"}, O)),
+        ("ask", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "branch": "claude/y", "sha": "a"}, O)),
+        ("allow", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "branch": "claude/x", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "", "branch": "claude/x", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": False, "branch": "claude/x", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": None, "branch": "claude/x", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "", "branch": "main", "sha": "a"}, O)),
+        ("deny", mcp("mcp__GitHub__create_branch", {**ID, "branch": "claude/x", "ref": "main"}, O)),
+        ("deny", mcp("mcp__GitHub__create_ref", {**ID, "ref": "refs/heads/claude/x", "branch": "refs/tags/v1", "sha": "a"}, O)),
         # R4: forced MCP ref updates deny; ambiguous force values ask
         ("allow", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": False}, O)),
         ("deny", mcp("mcp__GitHub__update_ref", {**ID, "ref": "refs/heads/claude/x", "sha": "a", "force": True}, O)),

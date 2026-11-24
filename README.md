@@ -42,7 +42,7 @@ scaffold contained.
 | `config/settings.json.example` | Example `.claude/settings.json` wiring showing the hook matchers, including the non-Bash MCP tool names. |
 | `.claude/hooks/github_transition_guard.py` | `PreToolUse` hook that stops consequential GitHub transitions from an agent session (merge, close, approve, pushes to protected branches, force pushes, repo settings, secrets, releases). Master copy; the same file ships in each Shadowfox repo. |
 | `.claude/settings.json` | Deny and ask permission rules plus the hook wiring for this repo. |
-| `tests/test_github_transition_guard.py` | Offline proof for the guard (190 cases, no network). Run `python3 -I tests/test_github_transition_guard.py`; set `GUARD_HOOK` to test another repo's copy. CI runs it through `tests/python/test_transition_guard_suite.py`, which pins `GUARD_HOOK` to this checkout's guard. |
+| `tests/test_github_transition_guard.py` | Offline proof for the guard (199 cases, no network). Run `python3 -I tests/test_github_transition_guard.py`; set `GUARD_HOOK` to test another repo's copy. CI runs it through `tests/python/test_transition_guard_suite.py`, which pins `GUARD_HOOK` to this checkout's guard. |
 
 ## The T0-GO marker — closes gap #2 (no in-path enforcement)
 

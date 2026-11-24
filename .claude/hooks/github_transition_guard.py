@@ -801,11 +801,28 @@ def force_finding(tool_name: str, tool_input: dict):
     return finding(ASK, "AMBIGUOUS_FORCE_VALUE", f"{tool_name}: force={value!r}")
 
 
+REF_TARGET_FIELDS = ("ref", "branch")
+
+
 def ref_write_finding(tool_name: str, tool_input: dict, cwd: str):
-    target = ref_target(tool_input.get("ref") or tool_input.get("branch"))
-    if target is None or target[0] == "tag" or is_protected(target[1], cwd):
-        label = f"{target[0]}={target[1]}" if target else "unresolved"
-        return finding(DENY, "PROTECTED_REF", f"{tool_name} {label}")
+    """Check every ref/branch field the call carries, because which one a
+    given tool writes is not verified. Any present field that is unresolved
+    (empty, null, non-string), a tag, or a protected branch denies, as does a
+    call with neither field. Two fields naming different branches ask rather
+    than letting one silently win."""
+    present = [field for field in REF_TARGET_FIELDS if field in tool_input]
+    if not present:
+        return finding(DENY, "PROTECTED_REF", f"{tool_name} unresolved")
+    targets = {}
+    for field in present:
+        target = ref_target(tool_input[field])
+        if target is None or target[0] == "tag" or is_protected(target[1], cwd):
+            label = f"{target[0]}={target[1]}" if target else "unresolved"
+            return finding(DENY, "PROTECTED_REF", f"{tool_name} {field}: {label}")
+        targets[field] = target
+    if len(set(targets.values())) > 1:
+        named = ", ".join(f"{field}={target[1]}" for field, target in targets.items())
+        return finding(ASK, "CONFLICTING_REF_TARGETS", f"{tool_name} {named}")
     return None
 
 
