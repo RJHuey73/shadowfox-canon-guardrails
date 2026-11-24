@@ -684,27 +684,70 @@ MCP_READ_TOOLS = frozenset({
 MCP_FILE_WRITES = frozenset({"push_files", "create_or_update_file", "create_file", "update_file", "create_commit"})
 MCP_REF_WRITES = frozenset({"create_branch", "create_ref", "update_ref"})
 MCP_COMMENT_TOOLS = frozenset({"add_issue_comment", "add_comment_to_pending_review"})
-MCP_REVIEW_TOOLS = frozenset({
-    "create_pull_request_review", "pull_request_review_write", "create_pending_pull_request_review",
-    "submit_pending_pull_request_review", "add_review_to_pr", "request_copilot_review",
-})
+# Recognised review tools and the one argument that carries each tool's review
+# event. "event" follows the GitHub MCP server's published schema as known
+# when this was written; "action" for add_review_to_pr is as relayed in the
+# 2026-11-23 audit. Neither is checked against a live server. Approval is read
+# from this field only, never from other arguments (labels, metadata, state).
+REVIEW_EVENT_FIELD = {
+    "pull_request_review_write": "event",
+    "create_pull_request_review": "event",
+    "create_pending_pull_request_review": "event",
+    "submit_pending_pull_request_review": "event",
+    "add_review_to_pr": "action",
+}
+MCP_REVIEW_TOOLS = frozenset(REVIEW_EVENT_FIELD) | {"delete_pending_pull_request_review", "request_copilot_review"}
+# For a review-named tool the guard does not recognise, the arguments read for
+# an approval, so an approval through it still denies.
+UNKNOWN_REVIEW_EVENT_FIELDS = ("event", "action")
+# pull_request_review_write operations by method.
+REVIEW_WRITE_METHODS = {"create", "submit_pending", "delete_pending"}
+APPROVE_VALUES = {"APPROVE", "APPROVED"}
+NON_APPROVING_EVENTS = {"COMMENT", "REQUEST_CHANGES"}
 # Reruns are allowed by policy, as on the Bash path.
 MCP_RERUN_TOOLS = frozenset({"rerun_workflow_run", "rerun_failed_jobs", "rerun_workflow_job"})
 MCP_PR_ISSUE_WRITES = frozenset({
     "create_pull_request", "update_pull_request", "update_pull_request_branch",
     "create_issue", "update_issue", "issue_write",
 })
-APPROVE_VALUES = {"APPROVE", "APPROVED"}
 
 
-def approves(tool_input: dict) -> bool:
-    """True when any top-level string argument other than the free-text body
-    is an approval, whatever its key (event, action, review_event, ...)."""
-    return any(
-        isinstance(v, str) and v.strip().upper() in APPROVE_VALUES
-        for k, v in tool_input.items()
-        if k != "body"
-    )
+def review_event(tool_input: dict, field: str) -> str | None:
+    """The upper-cased review event, None when the field is absent, "" when
+    it is present but not a string."""
+    if field not in tool_input:
+        return None
+    value = tool_input[field]
+    return value.strip().upper() if isinstance(value, str) else ""
+
+
+def review_finding(tool: str, tool_name: str, tool_input: dict):
+    """Classify a recognised review tool by operation.
+
+    Approvals and pending-review deletion deny. A comment or request-changes
+    event, and creating a pending review with no event, pass. Anything else
+    (missing or unknown method, missing or unknown event where one is
+    required) asks.
+    """
+    if tool == "request_copilot_review":
+        return None
+    if tool == "delete_pending_pull_request_review":
+        return finding(DENY, "DELETE_PENDING_REVIEW", tool_name)
+    event_optional = tool == "create_pending_pull_request_review"
+    if tool == "pull_request_review_write":
+        method = tool_input.get("method")
+        if method == "delete_pending":
+            return finding(DENY, "DELETE_PENDING_REVIEW", tool_name)
+        if not isinstance(method, str) or method not in REVIEW_WRITE_METHODS:
+            return finding(ASK, "UNKNOWN_REVIEW_METHOD", f"{tool_name} method={method!r}")
+        event_optional = method == "create"
+    field = REVIEW_EVENT_FIELD[tool]
+    event = review_event(tool_input, field)
+    if event in APPROVE_VALUES:
+        return finding(DENY, "APPROVE_PR", tool_name)
+    if event in NON_APPROVING_EVENTS or (event is None and event_optional):
+        return None
+    return finding(ASK, "UNRESOLVED_REVIEW_EVENT", f"{tool_name} {field}={tool_input.get(field)!r}")
 
 
 def is_protected(name: str, cwd: str) -> bool:
@@ -777,12 +820,16 @@ def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
         return finding(DENY, "MERGE_PR", tool_name)
     if state == "closed" and tool in ("update_pull_request", "update_issue", "issue_write"):
         return finding(DENY, "CLOSE_PR_OR_ISSUE", tool_name)
-    if "review" in tool and approves(tool_input):
-        return finding(DENY, "APPROVE_PR", tool_name)
     if tool in ("delete_file", "delete_repository", "delete_branch"):
         return finding(DENY, "DELETE", tool_name)
     if "comment" in tool and DEPENDABOT_CMD.search(str(tool_input.get("body", ""))):
         return finding(DENY, "DEPENDABOT_COMMAND", tool_name)
+    # Reviews: recognised tools by operation; any other review-named tool
+    # denies on an approval in its event/action argument, otherwise asks below.
+    if tool in MCP_REVIEW_TOOLS:
+        return review_finding(tool, tool_name, tool_input)
+    if "review" in tool and any(review_event(tool_input, f) in APPROVE_VALUES for f in UNKNOWN_REVIEW_EVENT_FIELDS):
+        return finding(DENY, "APPROVE_PR", tool_name)
     # Writes to repository contents and refs.
     if tool in MCP_FILE_WRITES:
         return strongest([
@@ -800,7 +847,7 @@ def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
     if tool == "update_pull_request" and "draft" in tool_input and tool_input["draft"] is not True:
         return finding(ASK, "MARK_READY_FOR_REVIEW", tool_name)
     # Recognised tools with no consequential effect in the arguments above.
-    if tool in MCP_READ_TOOLS | MCP_COMMENT_TOOLS | MCP_REVIEW_TOOLS | MCP_RERUN_TOOLS | MCP_PR_ISSUE_WRITES:
+    if tool in MCP_READ_TOOLS | MCP_COMMENT_TOOLS | MCP_RERUN_TOOLS | MCP_PR_ISSUE_WRITES:
         return None
     # Default for a GitHub tool this guard does not recognise: ask, never allow.
     return finding(ASK, "UNCLASSIFIED_GITHUB_MCP_TOOL", tool_name)
