@@ -2,11 +2,13 @@
 """
 issue_t0_go.py — mints a T0-GO marker. HUMAN-RUN ONLY.
 
-This script exists specifically so the marker checked by pre_tool_guard.py
-and lib/airtable-client.js's requireT0Go() can only originate from a human
-at a keyboard. Do not wire this into anything an agent session can invoke on
-itself — a hook or MCP tool that can both mint and consume its own
-authorization is not a gate, it's a formality.
+This script is the intended source of the marker checked by
+pre_tool_guard.py and lib/airtable-client.js's requireT0Go(). It is meant to
+be run by a human at a keyboard, but nothing enforces that: an agent session
+with Bash or file-write access can run it, or write the marker file directly
+(docs/THREAT-MODEL.md, T10). Do not wire this into anything an agent session
+can invoke on itself — a hook or MCP tool that can both mint and consume its
+own authorization is not a gate, it's a formality.
 
 Usage:
   python3 hooks/issue_t0_go.py --decision-id T0-DEC-EXAMPLE-2026-0905 \\
