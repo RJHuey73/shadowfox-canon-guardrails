@@ -13,11 +13,15 @@ outside the session.
 
 Enforcement class: client. This runs inside the agent's own harness. It
 stops the model's tool calls, including reordered flags, compound commands,
-`bash -c` strings and raw HTTP calls it can parse. It does not stop a
-process that edits this file, a tool outside Claude Code, or a write hidden
-in a script it cannot read (for example `python3 -c "os.system(...)"`).
-Platform controls (branch protection, an agent identity without merge
-rights) are the durable fix.
+`bash -c` strings, inline `python -c` code that spawns a process, and raw
+HTTP calls it can parse. It does not stop a process that edits this file, a
+tool outside Claude Code, or a write hidden where it cannot read: a script
+file, a heredoc, inline code for other interpreters, or a command string
+that is computed rather than written out. Platform controls (branch
+protection, an agent identity without merge rights) are the durable fix.
+
+MCP file writes aimed at a repository other than this session's origin are
+denied: that repository's default branch cannot be known here.
 
 Output: a PreToolUse permissionDecision of deny or ask, or nothing (allow).
 Any internal error denies (fail closed).
@@ -28,6 +32,7 @@ repository's origin default branch is added when it can be read.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -102,6 +107,20 @@ def protected_branches(repo_dir: str) -> set[str]:
 
 def current_branch(repo_dir: str) -> str | None:
     return run_git(repo_dir, "symbolic-ref", "--short", "-q", "HEAD")
+
+
+def branch_name(value) -> str:
+    """Bare branch name. GitHub accepts refs/heads/<name> wherever it takes a branch."""
+    return str(value).strip().removeprefix("refs/heads/")
+
+
+REMOTE_SLUG = re.compile(r"[:/](?P<owner>[^/:]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
+
+
+def origin_slug(repo_dir: str) -> str | None:
+    """owner/repo of this checkout's origin, lowercased, or None."""
+    m = REMOTE_SLUG.search(run_git(repo_dir, "remote", "get-url", "origin") or "")
+    return f"{m['owner']}/{m['repo']}".lower() if m else None
 
 
 def tokenize(command: str) -> list[str] | None:
@@ -302,7 +321,7 @@ def check_gh_api(args: list[str], repo_dir: str):
     if method == "POST" and at(r"/git/tags"):
         return finding(ASK, "CREATE_TAG", path)
     if method in ("PUT", "DELETE") and at(r"/contents/.+"):
-        branch = fields.get("branch", "")
+        branch = branch_name(fields.get("branch", ""))
         if not branch or branch in protected:
             return finding(
                 DENY,
@@ -519,6 +538,66 @@ def check_raw(command: str):
     return strongest(findings)
 
 
+# ------------------------------------------------------------ inline python
+
+PYTHON = re.compile(r"python(\d+(\.\d+)*)?")
+PYTHON_VALUE_OPTS = {"-W", "-X"}
+SPAWN_CALLS = {
+    "system", "popen", "run", "call", "check_call", "check_output", "Popen",
+    "getoutput", "getstatusoutput", "spawnl", "spawnlp", "spawnv", "spawnvp",
+    "execl", "execlp", "execv", "execvp", "execve", "execvpe",
+}
+
+
+def inline_python(args: list[str]) -> str | None:
+    """The code given to `python -c`, or None (script file, -m, stdin)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if re.fullmatch(r"-[a-zA-Z]*c", a):
+            return args[i + 1] if i + 1 < len(args) else None
+        if a in PYTHON_VALUE_OPTS:
+            i += 2
+            continue
+        if a == "-m" or not a.startswith("-"):
+            return None
+        i += 1
+    return None
+
+
+def string_literals(tree: ast.AST) -> list[str]:
+    """Every string constant, plus every list/tuple of them joined as argv."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            out.append(n.value)
+        elif isinstance(n, (ast.List, ast.Tuple)) and n.elts and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in n.elts
+        ):
+            out.append(shlex.join(e.value for e in n.elts))
+    return out
+
+
+def check_python(code: str, repo_dir: str, depth: int):
+    """When inline code can spawn a process, check each of its string literals
+    as a shell command. A computed or obfuscated command is not seen."""
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        if re.search(r"\b(git|gh)\b|api\.github\.com", code):
+            return finding(DENY, "UNPARSEABLE_COMMAND", "python -c, fail closed")
+        return None
+    spawns = any(
+        isinstance(n, ast.Call)
+        and (getattr(n.func, "attr", None) or getattr(n.func, "id", None))
+        in SPAWN_CALLS
+        for n in ast.walk(tree)
+    )
+    if not spawns:
+        return None
+    return strongest(classify_bash(s, repo_dir, depth) for s in string_literals(tree))
+
+
 # -------------------------------------------------------------------- Bash
 
 
@@ -553,6 +632,10 @@ def classify_bash(command: str, cwd: str, depth: int = 0):
             findings.append(check_gh(command_args(tokens, idx), repo_dir))
         elif depth < MAX_DEPTH and is_shell_string(tokens, idx):
             findings.append(classify_bash(tok, repo_dir, depth + 1))
+        elif depth < MAX_DEPTH and PYTHON.fullmatch(name):
+            code = inline_python(command_args(tokens, idx))
+            if code is not None:
+                findings.append(check_python(code, repo_dir, depth + 1))
     return strongest(findings)
 
 
@@ -568,7 +651,7 @@ def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
     tool = m.group("tool").lower()
     state = str(tool_input.get("state", "")).lower()
     event = str(tool_input.get("event", "")).upper()
-    branch = str(tool_input.get("branch", ""))
+    branch = branch_name(tool_input.get("branch", ""))
     if "merge_pull_request" in tool or "auto_merge" in tool:
         return finding(DENY, "MERGE_PR", tool_name)
     closing = state == "closed"
@@ -579,6 +662,14 @@ def classify_mcp(tool_name: str, tool_input: dict, cwd: str):
     if tool in ("delete_file", "delete_repository", "delete_branch"):
         return finding(DENY, "DELETE", tool_name)
     writes_file = tool in ("push_files", "create_or_update_file")
+    owner, repo = tool_input.get("owner"), tool_input.get("repo")
+    target = f"{owner}/{repo}".lower()
+    if writes_file and (owner or repo) and target != origin_slug(cwd):
+        return finding(
+            DENY,
+            "WRITE_TO_OTHER_REPOSITORY",
+            f"{owner}/{repo}: its default branch is unknown from this session",
+        )
     if writes_file and (not branch or branch in protected_branches(cwd)):
         return finding(
             DENY,
